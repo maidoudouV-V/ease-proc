@@ -1,0 +1,4 @@
+# 忽略所有 db 文件
+*.db
+*.sqlite
+*.sqlite3
