@@ -1,0 +1,684 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>进程管理器</title>
+    <script type="module" src="/index.js"></script>
+    <link rel="stylesheet" href="index.css" />
+    <!-- 所有前端设计应遵循material design规范 -->
+    <!-- 引入字体文件 -->
+    <link rel="stylesheet" href="fonts.css" />
+
+    <!-- 引入 ECharts -->
+    <script src="echarts.js"></script>
+  </head>
+  <body v-scope>
+    <div class="app-container" @vue:mounted="mounted()">
+      <!-- 顶部应用栏 -->
+      <header class="app-bar" data-tauri-drag-region>
+        <div class="app-branding">
+          <img
+            src="./assets/icon.png"
+            alt="App Logo"
+            class="app-logo"
+            data-tauri-drag-region
+          />
+          <!-- <span data-tauri-drag-region>Monitor</span> -->
+        </div>
+        <nav class="nav-tabs" data-tauri-drag-region>
+          <div
+            class="nav-tab"
+            :class="{ active: activeTab === 'dashboard' }"
+            @click="activeTab = 'dashboard'"
+          >
+            <span
+              class="material-symbols-outlined"
+              style="font-size: 18px; margin-right: 6px"
+              >dashboard</span
+            >
+            仪表板
+          </div>
+          <div
+            class="nav-tab"
+            :class="{ active: activeTab === 'monitor-management' }"
+            @click="activeTab = 'monitor-management'"
+          >
+            <span
+              class="material-symbols-outlined"
+              style="font-size: 18px; margin-right: 6px"
+              >box_edit</span
+            >
+            监控管理
+          </div>
+        </nav>
+        <div class="app-controls">
+          <div
+            class="status-indicator"
+            :class="{ warning: enabledMonitorCount === 0 }"
+          >
+            <div class="status-dot"></div>
+            <span>{{ enabledMonitorCount > 0 ? '监控中' : '未监控' }}</span>
+          </div>
+          <button
+            class="icon-button"
+            title="运行日志"
+            @click="openLogModal('info')"
+          >
+            <span class="material-symbols-outlined">article</span>
+          </button>
+          <button
+            class="icon-button"
+            :class="{ active: activeTab === 'settings' }"
+            title="设置"
+            @click="activeTab = 'settings'"
+          >
+            <span class="material-symbols-outlined">settings</span>
+          </button>
+          <div class="window-controls">
+            <button id="titlebar-minimize" class="win-btn" title="最小化">
+              <span class="material-symbols-outlined" style="font-size: 20px"
+                >remove</span
+              >
+            </button>
+            <button id="titlebar-maximize" class="win-btn" title="最大化">
+              <span class="material-symbols-outlined" style="font-size: 16px"
+                >crop_square</span
+              >
+            </button>
+            <button id="titlebar-close" class="win-btn close" title="关闭">
+              <span class="material-symbols-outlined" style="font-size: 20px"
+                >close</span
+              >
+            </button>
+          </div>
+        </div>
+      </header>
+      <!-- 主内容区域 -->
+      <main class="content-area">
+        <!-- 仪表板视图 -->
+        <div v-show="activeTab === 'dashboard'" class="dashboard-view">
+          <!-- 基础信息卡片 -->
+          <div class="dashboard-grid">
+            <!-- 系统信息 -->
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined">computer</span>
+                <span>主机名</span>
+              </div>
+              <div class="card-value">{{systemInfo.hostname}}</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined">dns</span>
+                <span>操作系统</span>
+              </div>
+              <div class="card-value">{{systemInfo.os_name}}</div>
+            </div>
+
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined">schedule</span>
+                <span>运行时间</span>
+              </div>
+              <div id="uptime-value" class="card-value">
+                {{systemInfo.start_time}}
+              </div>
+            </div>
+
+            <!-- 硬件信息 -->
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined"> developer_board </span>
+                <span>CPU 使用率</span>
+              </div>
+              <div class="card-value">{{systemStatus.cpu_usage}}%</div>
+              <div
+                style="
+                  font-size: 12px;
+                  color: var(--text-secondary);
+                  margin-top: 4px;
+                "
+              >
+                <span v-if="systemInfo.physical_core"
+                  >{{systemInfo.physical_core}}P /
+                  {{systemInfo.cpu_core_count}}T</span
+                >
+                <span v-else>{{systemInfo.cpu_core_count}} 核心</span>
+              </div>
+            </div>
+
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined">memory</span>
+                <span>内存使用率</span>
+              </div>
+              <div class="card-value">
+                {{Math.round(systemStatus.memory_usage/systemInfo.total_memory*100)}}%
+              </div>
+              <div
+                style="
+                  font-size: 12px;
+                  color: var(--text-secondary);
+                  margin-top: 4px;
+                "
+              >
+                {{systemStatus.memory_usage}} G / {{systemInfo.total_memory}} G
+              </div>
+            </div>
+
+            <div class="metric-card">
+              <div class="card-title">
+                <span class="material-symbols-outlined">network_check</span>
+                <span>网络活动</span>
+              </div>
+              <div
+                class="card-value"
+                style="
+                  font-size: 16px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 4px;
+                "
+              >
+                <div style="display: flex; align-items: center; gap: 6px">
+                  <span
+                    class="material-symbols-outlined"
+                    style="font-size: 16px; color: var(--success)"
+                    >arrow_downward</span
+                  >
+                  {{systemStatus.download_speed}}
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px">
+                  <span
+                    class="material-symbols-outlined"
+                    style="font-size: 16px; color: var(--primary)"
+                    >arrow_upward</span
+                  >
+                  {{systemStatus.upload_speed}}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 监控列表 -->
+          <div class="monitor-section">
+            <div class="section-title">
+              <span class="material-symbols-outlined">apps</span>
+              <span>监控列表</span>
+              <span
+                style="
+                  margin-left: auto;
+                  font-size: 12px;
+                  font-weight: 500;
+                  color: var(--text-secondary);
+                  background: var(--bg-body);
+                  padding: 4px 10px;
+                  border-radius: 99px;
+                "
+              >
+                {{enabledMonitorCount}} 个运行中监控
+              </span>
+            </div>
+            <div class="monitor-list">
+              <div
+                class="monitor-item"
+                v-for="target in monitorList.filter(t => t.monitor_enabled)"
+              >
+                <div class="monitor-info">
+                  <div class="monitor-avatar">
+                    <span class="material-symbols-outlined">web_asset</span>
+                  </div>
+                  <div class="monitor-details">
+                    <div class="monitor-name">{{target.alias}}</div>
+                    <div
+                      v-if="target.performance_record?.running"
+                      class="monitor-id"
+                    >
+                      PID {{target.performance_record.pid}}
+                    </div>
+                  </div>
+                </div>
+                <div
+                  v-if="target.performance_record?.running"
+                  class="monitor-stats"
+                >
+                  <div class="stat-item">
+                    <div class="stat-value">
+                      {{Math.round(target.performance_record.cpu_usage*10)/10}}
+                      %
+                    </div>
+                    <div class="stat-label">CPU</div>
+                  </div>
+                  <div class="stat-item">
+                    <div class="stat-value">
+                      {{Math.round(target.performance_record.memory_usage/1024/1024*10)/10}}
+                      MB
+                    </div>
+                    <div class="stat-label">内存</div>
+                  </div>
+                </div>
+                <div class="monitor-actions">
+                  <button
+                    class="action-button"
+                    :class="{
+                      'danger': target.performance_record?.running,
+                      'success': !target.performance_record?.running,
+                      'loading': loadingStates[target.id]
+                    }"
+                    :title="target.performance_record?.running ? '停止进程' : '启动进程'"
+                    @click="target.performance_record?.running ? stopProcess(target.id, $event) : startProcess(target.id, $event)"
+                  >
+                    <span class="material-symbols-outlined">
+                      {{ target.performance_record?.running ?
+                      'power_settings_new' : 'play_arrow' }}
+                    </span>
+                  </button>
+                  <button
+                    class="action-button"
+                    title="控制台输出"
+                    @click="openConsoleWindow(target)"
+                  >
+                    <span class="material-symbols-outlined">terminal</span>
+                  </button>
+                  <button disabled class="action-button" title="历史数据">
+                    <span class="material-symbols-outlined"
+                      >blood_pressure</span
+                    >
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 监控管理视图 -->
+        <div
+          v-show="activeTab === 'monitor-management'"
+          class="management-view"
+        >
+          <div class="section-header">
+            <div class="header-title">
+              <span class="material-symbols-outlined">tune</span>
+              <h2>配置管理</h2>
+            </div>
+            <button class="primary-btn" @click="openNewMonitorModal()">
+              <span class="material-symbols-outlined">add</span>
+              新建监控
+            </button>
+          </div>
+
+          <!-- 现有监控列表管理 -->
+          <div class="monitor-section">
+            <div class="section-title">
+              <span class="material-symbols-outlined">list</span>
+              <span>已配置项目</span>
+              <span
+                class="count-badge"
+                style="
+                  margin-left: auto;
+                  font-size: 12px;
+                  font-weight: 500;
+                  color: var(--text-secondary);
+                  background: var(--bg-body);
+                  padding: 4px 10px;
+                  border-radius: 99px;
+                "
+              >
+                {{monitorList.length}} 个项目
+              </span>
+            </div>
+
+            <div class="monitor-list">
+              <div
+                class="monitor-item"
+                v-for="target in monitorList"
+                :class="{
+                  disabled: !target.monitor_enabled,
+                  loading: loadingStates[target.id] 
+                }"
+              >
+                <div class="monitor-info">
+                  <div class="monitor-avatar">
+                    <span class="material-symbols-outlined">
+                      {{ target.target_type === 'LocalProcess' ? 'deployed_code'
+                      : 'dns' }}
+                    </span>
+                  </div>
+                  <div class="monitor-details">
+                    <div class="monitor-name">{{target.alias}}</div>
+                    <div class="monitor-type">
+                      {{ target.target_type === 'LocalProcess' ? '本地进程':
+                      target.target_type }}
+                    </div>
+                  </div>
+                </div>
+                <label class="switch-container" title="启用/禁用监控">
+                  <input
+                    type="checkbox"
+                    :checked="target.monitor_enabled"
+                    @change="toggleMonitorEnabled(target, $event)"
+                  />
+                  <span class="switch-slider"></span>
+                </label>
+                <div class="vertical-divider"></div>
+                <div class="monitor-actions">
+                  <button
+                    class="action-button"
+                    title="编辑配置"
+                    @click="openEditMonitorModal(target)"
+                  >
+                    <span class="material-symbols-outlined">edit</span>
+                  </button>
+                  <button
+                    class="action-button"
+                    title="打开目录"
+                    @click="openFolder(target.id)"
+                  >
+                    <span class="material-symbols-outlined">folder_open</span>
+                  </button>
+                  <button
+                    class="action-button danger"
+                    title="删除"
+                    @click="deleteProgram(target.id)"
+                  >
+                    <span class="material-symbols-outlined">delete</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 空状态 -->
+              <div
+                v-if="monitorList.length === 0"
+                class="empty-state"
+                style="
+                  padding: 40px;
+                  text-align: center;
+                  color: var(--text-secondary);
+                "
+              >
+                <span
+                  class="material-symbols-outlined"
+                  style="
+                    font-size: 48px;
+                    margin-bottom: 12px;
+                    color: var(--text-disabled);
+                  "
+                  >inbox</span
+                >
+                <p>暂无监控项目</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 设置视图 -->
+        <div v-show="activeTab === 'settings'" class="settings-view">
+          <div class="settings-header">
+            <h2>设置</h2>
+            <p>管理应用行为与偏好</p>
+          </div>
+
+          <div class="settings-card">
+            <!-- Setting Item -->
+            <div class="setting-item">
+              <div style="display: flex; align-items: center">
+                <div class="setting-icon">
+                  <span class="material-symbols-outlined">rocket_launch</span>
+                </div>
+                <div class="setting-content">
+                  <div class="setting-title">开机自启</div>
+                  <div class="setting-desc">
+                    随操作系统启动时自动运行 Ease Process
+                  </div>
+                </div>
+              </div>
+              <div class="setting-action">
+                <label class="switch-container">
+                  <input
+                    type="checkbox"
+                    v-model="autoStart"
+                    @change="$event.target.checked ? enableAutoStart() : disableAutoStart()"
+                  />
+                  <span class="switch-slider"></span>
+                </label>
+              </div>
+            </div>
+            <div class="setting-item">
+              <div style="display: flex; align-items: center">
+                <div class="setting-icon">
+                  <span class="material-symbols-outlined">article</span>
+                </div>
+                <div class="setting-content">
+                  <div class="setting-title">调试日志</div>
+                  <div class="setting-desc">显示程序详细运行日志</div>
+                </div>
+              </div>
+              <div class="setting-action">
+                <button class="action-button" @click="openLogModal('debug')">
+                  <span class="material-symbols-outlined">open_in_new</span>
+                </button>
+              </div>
+            </div>
+            <div class="setting-item">
+              <div style="display: flex; align-items: center">
+                <div class="setting-icon">
+                  <span class="material-symbols-outlined">restore_page</span>
+                </div>
+                <div class="setting-content">
+                  <div class="setting-title">重置数据</div>
+                  <div class="setting-desc">
+                    还原应用到初始状态，删除所有监控配置和数据
+                  </div>
+                </div>
+              </div>
+              <div class="setting-action">
+                <button class="action-button danger" @click="reset_database()">
+                  <span class="material-symbols-outlined">
+                    delete_forever
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- About Section -->
+          <div class="settings-card">
+            <div class="setting-item">
+              <div style="display: flex; align-items: center">
+                <div
+                  class="setting-icon"
+                  style="
+                    background: transparent;
+                    border: 1px solid var(--border-light);
+                  "
+                >
+                  <span class="material-symbols-outlined">code</span>
+                </div>
+                <div class="setting-content">
+                  <div class="setting-title">应用信息</div>
+                  <div class="setting-desc">Tauri + Petite-Vue</div>
+                </div>
+              </div>
+            </div>
+            <div class="setting-item">
+              <div style="display: flex; align-items: center">
+                <div
+                  class="setting-icon"
+                  style="
+                    background: var(--primary-light);
+                    color: var(--primary);
+                  "
+                >
+                  <span class="material-symbols-outlined">smart_toy</span>
+                </div>
+                <div class="setting-content">
+                  <div class="setting-title">Ease Process</div>
+                  <div class="setting-desc">当前版本 {{ appVersion }}</div>
+                </div>
+              </div>
+              <!-- <div class="setting-action" style="display: flex; gap: 8px">
+                <button
+                  class="action-button"
+                  title="Github"
+                  @click="openGithub()"
+                >
+                  <img
+                    src="./assets/javascript.svg"
+                    style="width: 20px; height: 20px; filter: grayscale(1)"
+                  />
+                </button>
+              </div> -->
+            </div>
+          </div>
+        </div>
+      </main>
+      <!-- 新建/编辑监控模态窗口 -->
+      <div v-if="showNewMonitorModal" class="modal-overlay">
+        <div class="modal-container">
+          <div class="modal-header">
+            <div class="modal-title">
+              {{ isEditMode ? '编辑监控任务' : '新建监控任务' }}
+            </div>
+            <button class="icon-button" @click="closeNewMonitorModal()">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label class="form-label">监控类型</label>
+              <select
+                class="form-input"
+                v-model="newMonitorForm.target_type"
+                :disabled="isEditMode"
+              >
+                <option value="LocalProcess">本地进程监控</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">名称</label>
+              <input
+                type="text"
+                class="form-input"
+                v-model="newMonitorForm.alias"
+                placeholder="为监控目标命名"
+              />
+            </div>
+
+            <div
+              v-if="newMonitorForm.target_type === 'LocalProcess'"
+              class="form-group"
+            >
+              <label class="form-label">启动路径</label>
+              <div class="path-input-group">
+                <input
+                  type="text"
+                  class="form-input"
+                  v-model="newProcessConfig.path"
+                  placeholder="选择或输入可执行文件路径"
+                />
+                <button
+                  class="btn-secondary"
+                  title="选择文件"
+                  @click="selectMonitorPath()"
+                >
+                  <span
+                    class="material-symbols-outlined"
+                    style="font-size: 20px"
+                    >folder_open</span
+                  >
+                </button>
+              </div>
+            </div>
+
+            <label
+              v-if="newMonitorForm.target_type === 'LocalProcess'"
+              class="checkbox-group"
+            >
+              <input type="checkbox" v-model="newProcessConfig.auto_restart" />
+              <span class="checkbox-label">自动 启动/重启</span>
+            </label>
+            <label
+              v-if="newMonitorForm.target_type === 'LocalProcess'"
+              class="checkbox-group"
+            >
+              <input
+                type="checkbox"
+                v-model="newProcessConfig.capture_output"
+              />
+              <span class="checkbox-label">捕获控制台输出</span>
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button class="btn-secondary" @click="closeNewMonitorModal()">
+              取消
+            </button>
+            <button class="primary-btn" @click="saveMonitor()">
+              {{ isEditMode ? '确认更新' : '确认创建' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 日志模态窗口 -->
+      <div
+        v-if="showLogModal"
+        class="modal-overlay"
+        @click.self="closeLogModal()"
+      >
+        <div class="modal-container log-modal">
+          <div class="modal-header">
+            <div class="modal-title">
+              {{ activeLogTab === 'info' ? '运行日志' : '调试日志' }}
+            </div>
+            <button class="icon-button" @click="closeLogModal()">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div class="log-content-area">
+            <div v-for="log in logList" class="log-entry selectable">
+              <span class="log-time">{{ log.time }}</span>
+              <span
+                class="log-level"
+                :class="{
+                  'level-error': log.level === 'ERROR',
+                  'level-warn': log.level === 'WARN',
+                  'level-debug': log.level === 'DEBUG',
+                  'level-info': log.level !== 'ERROR' && log.level !== 'WARN' && log.level !== 'DEBUG'
+                }"
+                >[{{ log.level }}]</span
+              >
+              <span class="log-message">{{ log.message }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 弹窗容器（Toast） -->
+    <div class="toast-container" aria-live="polite" aria-atomic="true">
+      <div
+        class="toast"
+        v-for="t in toast.items"
+        :class="t.type"
+        :key="t.id"
+        :data-status="t.status"
+        @animationend="toast.onAnimationEnd(t.id)"
+      >
+        <div class="toast-icon" aria-hidden="true">
+          <span class="material-symbols-outlined">
+            {{ t.type === 'success' ? 'check_circle' : t.type === 'error' ?
+            'error' : t.type === 'warning' ? 'warning' : 'info' }}
+          </span>
+        </div>
+
+        <div class="toast-content" @click="toast.close(t.id)">
+          <div class="toast-title">{{ t.title }}</div>
+          <div class="toast-message">{{ t.message }}</div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

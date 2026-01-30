@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>控制台输出</title>
+    <!-- 复用现有字体和变量 -->
+    <link rel="stylesheet" href="fonts.css" />
+    <link rel="stylesheet" href="index.css" />
+    <!-- 引入控制台页专用样式 -->
+    <link rel="stylesheet" href="console.css" />
+  </head>
+  <body style="background: var(--bg-body); overflow: hidden;">
+    <div
+      style="
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        width: 100%;
+      "
+    >
+      <!-- 顶部工具栏 -->
+      <header class="console-toolbar" data-tauri-drag-region>
+        <div class="console-info" data-tauri-drag-region>
+          <span class="material-symbols-outlined" style="color: var(--primary)">terminal</span>
+          <span id="process-alias">Loading...</span>
+        </div>
+
+        <div class="console-actions" data-tauri-drag-region>
+           <!-- 显示时间开关 -->
+           <label class="auto-scroll-switch" title="显示每条输出的时间戳">
+            <input type="checkbox" id="show-timestamp" />
+            <span>显示时间</span>
+          </label>
+           <!-- 自动滚动开关 -->
+           <label class="auto-scroll-switch" title="有新输出时自动滚动到底部">
+            <input type="checkbox" id="auto-scroll" checked />
+            <span>自动滚动</span>
+          </label>
+          <div class="vertical-divider" style="height: 16px; margin: 0 4px;"></div>
+          <button class="btn-icon-text" id="btn-copy" title="复制所有输出">
+            <span class="material-symbols-outlined">content_copy</span>
+            复制
+          </button>
+          <button class="btn-icon-text" id="btn-clear" title="清空输出">
+            <span class="material-symbols-outlined">block</span>
+            清空
+          </button>
+
+          <!-- 窗口控制按钮 -->
+          <div class="window-controls" style="border-left: 1px solid var(--border-light); padding-left: 12px; margin-left: 8px;">
+            <button id="win-minimize" class="win-btn" title="最小化">
+              <span class="material-symbols-outlined" style="font-size: 20px">remove</span>
+            </button>
+            <button id="win-maximize" class="win-btn" title="最大化">
+              <span class="material-symbols-outlined" style="font-size: 16px">crop_square</span>
+            </button>
+            <button id="win-close" class="win-btn close" title="关闭">
+              <span class="material-symbols-outlined" style="font-size: 20px">close</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <!-- 控制台内容展示区 (暗色终端风格) -->
+      <main class="console-container">
+        <div class="console-content" id="console-output"></div>
+      </main>
+
+      <!-- 底部状态栏 -->
+      <footer class="console-footer">
+        <div class="footer-item">
+          <span class="material-symbols-outlined" style="font-size: 14px">check_circle</span>
+          <span id="connection-status">Ready</span>
+        </div>
+        <div class="footer-item" style="margin-left: auto">
+            <span>UTF-8</span>
+        </div>
+        <div class="footer-item">
+            <span>Lines: <span id="line-count">0</span></span>
+        </div>
+      </footer>
+    </div>
+
+    <!-- 逻辑脚本 -->
+    <script type="module" src="console.js"></script>
+  </body>
+</html>
