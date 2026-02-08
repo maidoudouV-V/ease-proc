@@ -10,7 +10,7 @@ use sysinfo::{
     Pid, PidExt, ProcessExt, System, SystemExt,
 };
 use tauri::{AppHandle, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::spawn;
 use tokio::time::sleep;
@@ -80,9 +80,9 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
     let mut pid = None;
     // 当手动停止程序时，记录临时停止状态，防止自动重启
     let mut temp_stop = false;
+    // 低频全量刷新计数
+    let mut refresh_count = 0;
     while *monitor_enabled.read() {
-        // 刷新进程信息，更新 CPU/内存等指标
-        sys.refresh_processes();
         // 接收启动或关闭进程指令
         let signal = control_signal.lock().clone();
         if !signal.is_empty() {
@@ -92,6 +92,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
                 temp_stop = true;
                 // 检查进程是否还在
                 if let Some(current_pid) = pid{
+                    sys.refresh_process(current_pid);
                     pid = None;
                     if sys.process(current_pid).is_some() {
                         kill_process(current_pid.as_u32()).await.expect("停止进程失败");
@@ -110,7 +111,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
                             signal: "stop".to_string(),
                             message: format!("{:?} 已停止运行", alias),
                         }).unwrap();
-                        info!("监控程序已手动停止运行 {} PID:{}", alias, current_pid);
+                        info!("监控目标已手动停止运行 {} PID:{}", alias, current_pid);
                     }
                 }
             }else if signal == "start" {
@@ -135,10 +136,10 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
                                 signal: "start".to_string(),
                                 message: format!("{:?} 已启动", alias),
                             }).unwrap();
-                            info!("监控程序已手动启动 {} PID:{}", alias, new_pid);
+                            info!("监控目标已手动启动 {} PID:{}", alias, new_pid);
                         }
                         Err(e) => {
-                            error!("监控程序手动启动失败，{} 错误: {}", alias, e);
+                            error!("监控目标手动启动失败，{} 错误: {}", alias, e);
                             app_handle.emit_all("status_signal", StatusSignal{
                                 mt_id: id,
                                 target_type: "LocalProcess".to_string(),
@@ -151,13 +152,19 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
                 }
                 temp_stop = false;
             }
-            sys.refresh_processes();
         }
         // 检查进程是否存在
         if let Some(current_pid) = pid {
+            if refresh_count>60 {
+                sys.refresh_processes();
+                refresh_count = 0;
+            }else{
+                sys.refresh_process(current_pid);
+                refresh_count += 1;
+            }
             if sys.process(current_pid).is_some() {
                 // 获取进程树（父进程+所有子进程）的总负载
-                let (tree_cpu, tree_mem) = get_process_tree_usage(&sys, current_pid);
+                let (tree_cpu, tree_mem) = get_process_tree_usage(&mut sys, current_pid);
                 let mut performance_records_lock = performance_records.lock();
                 performance_records_lock.pop_back();
                 performance_records_lock.push_front(MonitorRecord::LocalProcess(LocalProcessMonitorRecord{
@@ -176,7 +183,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
                 }else{
                     // 进程丢失，设置pid = None
                     pid = None;
-                    error!("监控程序已停止运行 {} PID:{}", alias, current_pid);
+                    error!("程序已停止运行 {} PID:{}", alias, current_pid);
                     // 添加程序未运行记录
                     let mut performance_records_lock = performance_records.lock();
                     performance_records_lock.pop_back();
@@ -197,6 +204,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,  monitor
             }
         }else{
             // 查找进程
+            sys.refresh_processes();
             pid = find_process_by_path(&sys, program_path);
             // 程序未启动，判断是否需要自动重启
             if pid.is_none() && config.auto_restart && !temp_stop {
@@ -263,14 +271,12 @@ pub fn start_process(program_path: &Path, capture_output: bool, app_handle: AppH
 /// 根据给定的程序路径，查找运行中最顶层的进程 PID。
 fn find_process_by_path(sys: &System, program_path: &Path) -> Option<Pid> {
     let mut candidates = Vec::new();
-
     for (pid, process) in sys.processes() {
         if paths_are_equal(process.exe(), program_path) {
             candidates.push((*pid, process));
         }
     }
 
-    // 筛选：找到那个“父进程不是自己人”的进程
     for (pid, process) in &candidates {
         if let Some(parent_pid) = process.parent() {
             // 检查父进程是否存在于我们的候选列表中（即父进程是否也是同一个程序）
@@ -377,8 +383,8 @@ fn check_for_handover(sys: &System, old_pid: Pid, program_path: &Path) -> Option
     None
 }
 
-// 递归计算进程树的资源占用 (解决 bat 脚本本身不占资源的问题)
-fn get_process_tree_usage(sys: &System, root_pid: Pid) -> (f64, u64) {
+// 递归计算进程树的资源占用
+fn get_process_tree_usage(sys: &mut System, root_pid: Pid) -> (f64, u64) {
     let mut total_cpu = 0.0;
     let mut total_mem = 0;
     let mut queue = VecDeque::new();
@@ -388,6 +394,7 @@ fn get_process_tree_usage(sys: &System, root_pid: Pid) -> (f64, u64) {
     visited.insert(root_pid);
 
     while let Some(current_pid) = queue.pop_front() {
+        sys.refresh_process(current_pid);
         if let Some(process) = sys.process(current_pid) {
             total_cpu += process.cpu_usage() as f64;
             total_mem += process.memory();
@@ -407,42 +414,70 @@ fn get_process_tree_usage(sys: &System, root_pid: Pid) -> (f64, u64) {
 
 // 比较两个路径是否相同（忽略 Windows 大小写差异）
 fn paths_are_equal(p1: &Path, p2: &Path) -> bool {
-    let canon_p1 = p1.canonicalize().unwrap_or_else(|_| p1.to_path_buf());
-    let canon_p2 = p2.canonicalize().unwrap_or_else(|_| p2.to_path_buf());
+    // let canon_p1 = p1.canonicalize().unwrap_or_else(|_| p1.to_path_buf());
+    // let canon_p2 = p2.canonicalize().unwrap_or_else(|_| p2.to_path_buf());
     if cfg!(target_os = "windows") {
-        canon_p1.to_string_lossy().to_lowercase().replace("/", "\\") 
-            == canon_p2.to_string_lossy().to_lowercase().replace("/", "\\")
+        p1.to_string_lossy().to_lowercase().replace("/", "\\") 
+            == p2.to_string_lossy().to_lowercase().replace("/", "\\")
     } else {
-        canon_p1 == canon_p2
+        p1 == p2
     }
 }
 
 async fn handle_output <R>(out:R, app_handle: AppHandle, id:usize, console_outputs: Arc<Mutex<VecDeque<ConsoleMsg>>>) where R: AsyncRead + Unpin + Send + 'static {
     let mut reader = BufReader::new(out);
-    let mut buffer = Vec::new();
-    // 循环读取直到 EOF
-    while let Ok(n) = reader.read_until(b'\n', &mut buffer).await {
-        if n == 0 { break; } // 结束
-        let text = match String::from_utf8(buffer.clone()) {
-            Ok(s) => s,
-            Err(_) => {
-                // 失败：尝试用 GBK 解码
-                let (cow, _encoding_used, _had_errors) = GBK.decode(&buffer);
-                cow.to_string()
+    let mut buf = [0u8; 4096];
+    let mut pending: Vec<u8> = Vec::new();
+    const MAX_PARTIAL: usize = 8192;
+
+    loop {
+        let n = match reader.read(&mut buf).await {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(e) => {
+                error!("读取子进程输出失败: {}", e);
+                break;
             }
-        };        
-        // 发送给前端
-        let payload = ConsoleMsg{
-            msg:text,
-            time: Local::now().format("%H:%M:%S%.3f").to_string()
         };
-        let _ = app_handle.emit_all(&format!("console_out_stream_{}",id), &payload);
-        // 保存到缓存
-        console_outputs.lock().push_back(payload);
-        if console_outputs.lock().len() > 2000 {
-            console_outputs.lock().pop_front();
+
+        pending.extend_from_slice(&buf[..n]);
+
+        while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = pending.drain(..=pos).collect();
+            emit_console_line(&line_bytes, &app_handle, id, &console_outputs);
         }
-        buffer.clear(); // 清空缓冲区用于下一行
+
+        // 如果一直没换行，避免堆积过大，直接刷出一段
+        if pending.len() >= MAX_PARTIAL {
+            let line_bytes = pending.split_off(0);
+            emit_console_line(&line_bytes, &app_handle, id, &console_outputs);
+        }
+    }
+
+    // flush 最后残余
+    if !pending.is_empty() {
+        emit_console_line(&pending, &app_handle, id, &console_outputs);
+    }
+}
+
+fn emit_console_line(bytes: &[u8], app_handle: &AppHandle, id: usize, console_outputs: &Arc<Mutex<VecDeque<ConsoleMsg>>>) {
+    let text = match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(_) => {
+            // 失败：尝试用 GBK 解码
+            let (cow, _encoding_used, _had_errors) = GBK.decode(bytes);
+            cow.to_string()
+        }
+    };
+    let payload = ConsoleMsg{
+        msg: text,
+        time: Local::now().format("%H:%M:%S%.3f").to_string()
+    };
+    let _ = app_handle.emit_all(&format!("console_out_stream_{}", id), &payload);
+    let mut lock = console_outputs.lock();
+    lock.push_back(payload);
+    if lock.len() > 2000 {
+        lock.pop_front();
     }
 }
 

@@ -11,7 +11,7 @@ let isWaitingForStream = true;
 
 // DOM 元素引用
 const consoleOutput = document.getElementById("console-output");
-const lineCountEl = document.getElementById("line-count");
+// const lineCountEl = document.getElementById("line-count");
 const autoScrollCheckbox = document.getElementById("auto-scroll");
 const showTimestampCheckbox = document.getElementById("show-timestamp");
 
@@ -61,12 +61,12 @@ function scrollToBottom() {
   }
 }
 
-// 辅助函数：更新行数统计
-function updateLineCount() {
-  if (lineCountEl) {
-    lineCountEl.textContent = lineCount;
-  }
-}
+// // 辅助函数：更新行数统计
+// function updateLineCount() {
+//   if (lineCountEl) {
+//     lineCountEl.textContent = lineCount;
+//   }
+// }
 
 // 功能实现：清空输出
 function clearConsoleData() {
@@ -75,7 +75,7 @@ function clearConsoleData() {
   }
   consoleLines = [];
   lineCount = 0;
-  updateLineCount();
+  // updateLineCount();
 }
 document.getElementById("btn-clear")?.addEventListener("click", () => {
   clearConsoleData();
@@ -117,7 +117,7 @@ function appendConsole(time, text) {
   // 保存数据
   consoleLines.push({ time: time, text: text });
   lineCount++;
-  updateLineCount();
+  // updateLineCount();
 
   // 创建 DOM 节点
   if (consoleOutput) {
