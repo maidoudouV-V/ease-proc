@@ -36,6 +36,7 @@ mod local_host_monitor;
 mod monitor_manager;
 mod logging;
 mod process_guard;
+mod process_sampler;
 
 fn main() {
     println!("初始化应用...");
