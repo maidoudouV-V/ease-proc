@@ -9,6 +9,7 @@ use tokio::spawn;
 use tokio::time::sleep;
 use tracing::{debug, error, info};
 use crate::monitor::ConsoleMsg;
+use crate::process_sampler::ProcessSampler;
 use crate::{monitor::{MonitorShowInfo, MonitorTarget, MonitorTargetType}, MonitorTargetDto};
 use anyhow::{anyhow, Result};
 
@@ -20,6 +21,8 @@ pub struct MonitorManager {
     connection_pool: Pool<SqliteConnectionManager>,
     /// Tauri 应用句柄
     app_handle: AppHandle,
+    // 本地进程监控数据采样器
+    process_sampler: Arc<ProcessSampler>,
 }
 
 impl MonitorManager {
@@ -29,6 +32,7 @@ impl MonitorManager {
             monitors: Arc::new(Mutex::new(HashMap::new())),
             connection_pool: pool,
             app_handle,
+            process_sampler: Arc::new(ProcessSampler::new(Duration::from_secs(1)))
         }
     }
 
@@ -78,9 +82,10 @@ impl MonitorManager {
             target.alias = update_target_form.alias;
             target.target_type_cfg = update_target_form.target_type;
         }
-        // 重启监控任务
+        // 如果正在运行，重启监控任务
         if *exist_target.lock().monitor_enabled.read(){
             let app = self.app_handle.clone();
+            let sampler = self.process_sampler.clone();
             spawn(async move {
                 let mut finished = false;
                 let handle_to_wait = exist_target.lock().stop_monitor();
@@ -96,7 +101,7 @@ impl MonitorManager {
                         handle.abort();
                     }
                 }
-                exist_target.lock().start_monitor(app);
+                exist_target.lock().start_monitor(app, sampler);
             });
         }
         info!("已修改监控目标配置 {}", alias);
@@ -110,7 +115,8 @@ impl MonitorManager {
             self.monitors.lock().get(&id).cloned()
         };
         if let Some(monitor) = monitor {
-            monitor.lock().start_monitor(self.app_handle.clone());
+            &self.process_sampler.spawn();
+            monitor.lock().start_monitor(self.app_handle.clone(), self.process_sampler.clone());
             // 修改数据库状态
             match self.connection_pool.get() {
                 Ok(conn) => {
@@ -159,7 +165,15 @@ impl MonitorManager {
             // 目标不存在
             return false;
         }
-        let handle_to_wait  = monitor.lock().stop_monitor();
+        let handle_to_wait = monitor.lock().stop_monitor();
+        // 检查是否还有运行中的本地进程监控
+        if !self.monitors.lock().values().any(|m| {
+            let m = m.lock();
+            *m.monitor_enabled.read() && matches!(m.target_type_cfg, MonitorTargetType::LocalProcess(_))
+        }) {
+            // 如果没有本地进程正在运行，关闭采集
+            self.process_sampler.stop().await;
+        }
         // 超时强行关闭线程
         let mut finished = false;
         if let Some(handle) = handle_to_wait{
@@ -185,9 +199,9 @@ impl MonitorManager {
         debug!("正在启动所有已激活的监控目标");
         let monitors = self.monitors.lock().clone();
         for (_, monitor) in monitors.iter() {
-            let mut monitor_guard = monitor.lock();
-            if *monitor_guard.monitor_enabled.read() {
-                monitor_guard.start_monitor(self.app_handle.clone());
+            if *monitor.lock().monitor_enabled.read() {
+                let id = monitor.lock().id;
+                self.enable_monitor(id).await;
             }
         }
     }

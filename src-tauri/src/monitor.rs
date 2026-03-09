@@ -33,6 +33,7 @@ use winapi::um::winbase::{CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP};
 
 use crate::local_process_monitor::run_program_monitor;
 use crate::local_host_monitor::run_host_monitor;
+use crate::process_sampler::ProcessSampler;
 use crate::MonitorTargetDto;
 
 
@@ -64,7 +65,7 @@ impl MonitorTarget {
     }
     
     // 启动监控
-    pub fn start_monitor(&mut self, app_handle: AppHandle) {
+    pub fn start_monitor(&mut self, app_handle: AppHandle, local_process_sampler: Arc<ProcessSampler>) {
         if self.task_handle.is_some() {
             // 已经在运行
             return;
@@ -79,7 +80,7 @@ impl MonitorTarget {
                  self.performance_records.clone(),
                   self.control_signal.clone(),
                   app_handle,
-                self.alias.clone(), self.console_outputs.clone()))
+                self.alias.clone(), self.console_outputs.clone(), local_process_sampler.clone()))
             }
             MonitorTargetType::RemoteHost => {panic!()}
         };

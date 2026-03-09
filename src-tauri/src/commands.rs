@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use tracing::info;
 use std::sync::Arc;
 use parking_lot::lock_api::RwLockReadGuard;
-use sysinfo::{System, SystemExt};
+use sysinfo::{System};
 use tauri::{AppHandle, State};
 use tokio::spawn;
 use anyhow::{anyhow, Result};
@@ -43,13 +43,12 @@ pub type CommandResult<T> = Result<T, CommandError>;
 pub fn get_system_info() -> SystemInfo {
     let system = System::new_all();
     let cpu_core_count = system.cpus().len();
-    let physical_core = system.physical_core_count().unwrap_or(0);
-    let info = os_info::get();
-    let os_name_str = format!("{}", info.edition().unwrap_or("Unknown"));
+    let physical_core = System::physical_core_count().unwrap_or(0);
+    // let info = os_info::get();
     SystemInfo {
-        hostname: system.host_name().unwrap_or_else(|| String::from("Unknown")),
-        os_name: os_name_str,
-        start_time: system.boot_time().to_string(),
+        hostname: System::host_name().unwrap_or_else(|| String::from("Unknown")),
+        os_name: System::long_os_version().unwrap_or("Unknown".to_string()),
+        start_time: System::boot_time().to_string(),
         cpu_core_count,
         physical_core,
         total_memory: format!("{:.1}",(system.total_memory() as f32)/1024.0/1024.0/1024.0),

@@ -3,26 +3,21 @@ use std::time::Duration;
 use chrono::Local;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::Connection;
-use sysinfo::{
-    CpuExt, CpuRefreshKind, NetworkExt, Networks, NetworksExt, System, SystemExt,
-};
+use sysinfo::{Networks, System};
 use tokio::time::sleep;
-use crate::monitor::{LocalHostMonitorRecord, MonitorRecord, MonitorTarget};
+use crate::monitor::{LocalHostMonitorRecord, MonitorRecord};
 
 /// 运行本地主机监控
 pub async fn run_host_monitor(id: usize, monitor_enabled: Arc<RwLock<bool>>, performance_records: Arc<Mutex<VecDeque<MonitorRecord>>>) {
-    let mut sys = System::new();
-    sys.refresh_networks_list();
-    sys.refresh_networks();
+    let mut sys = System::new_all();
+    let mut networks = Networks::new_with_refreshed_list();
     // 寻找主网卡名称
-    let main_interface_name = get_main_interface_name(sys.networks());
+    let main_interface_name = get_main_interface_name(&networks);
     // 监控循环
     while *monitor_enabled.read() {
         sleep(Duration::from_secs(1)).await;
-        
         // 只刷新CPU使用率
-        sys.refresh_cpu_specifics(CpuRefreshKind::everything().without_frequency());
-    
+        sys.refresh_cpu_usage();
         // 获取CPU使用率
         let cpu_usage = {
             let cpus = sys.cpus();
@@ -43,8 +38,8 @@ pub async fn run_host_monitor(id: usize, monitor_enabled: Arc<RwLock<bool>>, per
         let mut total_rx = 0;
         let mut total_tx = 0;
         // 刷新网络数据（这会更新自上次刷新以来的数据变动）
-        sys.refresh_networks();
-        for (name, network) in sys.networks() {
+        networks.refresh(false);
+        for (name, network) in &networks {
             if name == &main_interface_name {
                 // received() 和 transmitted() 返回的是"自上次刷新后"的新增字节数
                 total_rx += network.received();
