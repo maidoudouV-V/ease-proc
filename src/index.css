@@ -9,7 +9,12 @@
   --primary-l: 52%;
   --primary: hsl(var(--primary-h), var(--primary-s), var(--primary-l));
   --primary-light: hsl(var(--primary-h), var(--primary-s), 95%);
-  --primary-glow: hsla(var(--primary-h), var(--primary-s), var(--primary-l), 0.3);
+  --primary-glow: hsla(
+    var(--primary-h),
+    var(--primary-s),
+    var(--primary-l),
+    0.3
+  );
 
   /* 功能色 */
   --success: #10b981;
@@ -32,8 +37,10 @@
 
   /* 阴影系统 */
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+  --shadow-md:
+    0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+  --shadow-lg:
+    0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
   --shadow-glow: 0 0 15px var(--primary-glow);
 
   /* 动效参数 */
@@ -53,7 +60,15 @@
 }
 
 body {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
   color: var(--text-main);
   height: 100vh;
   overflow: hidden;
@@ -762,6 +777,23 @@ body {
   border-top: 1px solid var(--border-light);
 }
 
+/* src/index.css */
+.update-tag {
+  display: inline-block;
+  background-color: var(--danger);
+  color: white;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 99px;
+  margin-left: 8px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  position: relative;       
+  top: -1px;
+}
+
+
 /* ======================================================= */
 /* 模态窗口 */
 /* ======================================================= */
@@ -785,7 +817,9 @@ body {
   width: 480px;
   border-radius: 16px;
   overflow: hidden;
-  box-shadow: var(--shadow-lg), 0 0 0 1px var(--border-light);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px var(--border-light);
   display: flex;
   flex-direction: column;
   animation: scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -964,13 +998,17 @@ body {
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.2), 0 2px 4px -1px rgba(59, 130, 246, 0.1);
+  box-shadow:
+    0 4px 6px -1px rgba(59, 130, 246, 0.2),
+    0 2px 4px -1px rgba(59, 130, 246, 0.1);
   transition: var(--transition-base);
 }
 
 .primary-btn:hover {
   background: hsl(var(--primary-h), var(--primary-s), 48%);
-  box-shadow: 0 10px 15px -3px rgba(59, 130, 246, 0.3), 0 4px 6px -2px rgba(59, 130, 246, 0.1);
+  box-shadow:
+    0 10px 15px -3px rgba(59, 130, 246, 0.3),
+    0 4px 6px -2px rgba(59, 130, 246, 0.1);
   transform: translateY(-1px);
 }
 

@@ -260,7 +260,7 @@ impl MonitorManager {
     
     // 对目标发送控制指令
     pub async fn change_control_signal(&self, id: usize, signal: String) {
-        debug!("发送控制指令 {}", id);
+        debug!("对目标 id:{} 发送控制指令 {}", id, signal);
         let monitor_to_update = {
             let monitors = self.monitors.lock();
             monitors.get(&id).cloned() 

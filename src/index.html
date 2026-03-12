@@ -71,7 +71,7 @@
             class="icon-button"
             :class="{ active: activeTab === 'settings' }"
             title="设置"
-            @click="activeTab = 'settings'"
+            @click="activeTab = 'settings'; checkUpdate();"
           >
             <span class="material-symbols-outlined">settings</span>
           </button>
@@ -282,10 +282,17 @@
                   >
                     <span class="material-symbols-outlined">terminal</span>
                   </button>
-                  <button disabled class="action-button" title="历史数据">
+                  <!-- <button disabled class="action-button" title="历史数据">
                     <span class="material-symbols-outlined"
                       >blood_pressure</span
                     >
+                  </button> -->
+                  <button
+                    class="action-button"
+                    title="打开目录"
+                    @click="openFolder(target.id)"
+                  >
+                    <span class="material-symbols-outlined">folder_open</span>
                   </button>
                 </div>
               </div>
@@ -501,6 +508,18 @@
                   <div class="setting-desc">Tauri + Petite-Vue</div>
                 </div>
               </div>
+              <!-- <div class="setting-action" style="display: flex; gap: 8px">
+                <button
+                  class="action-button"
+                  title="项目主页"
+                  @click="openGithub()"
+                >
+                  <img
+                    src="./assets/github.svg"
+                    style="width: 20px; height: 20px; filter: grayscale(1)"
+                  />
+                </button>
+              </div> -->
             </div>
             <div class="setting-item">
               <div style="display: flex; align-items: center">
@@ -515,21 +534,27 @@
                 </div>
                 <div class="setting-content">
                   <div class="setting-title">Ease Process</div>
-                  <div class="setting-desc">当前版本 {{ appVersion }}</div>
+                  <div class="setting-desc">
+                    当前版本 {{ appVersion }}
+                    <span v-if="hasUpdate" class="update-tag">发现新版本</span>
+                  </div>
                 </div>
               </div>
-              <!-- <div class="setting-action" style="display: flex; gap: 8px">
+              <div
+                v-if="hasUpdate"
+                class="setting-action"
+                style="display: flex; gap: 8px"
+              >
                 <button
                   class="action-button"
-                  title="Github"
-                  @click="openGithub()"
+                  title="更新版本"
+                  @click="updateSelf()"
                 >
-                  <img
-                    src="./assets/javascript.svg"
-                    style="width: 20px; height: 20px; filter: grayscale(1)"
-                  />
+                  <span class="material-symbols-outlined">
+                    browser_updated
+                  </span>
                 </button>
-              </div> -->
+              </div>
             </div>
           </div>
         </div>

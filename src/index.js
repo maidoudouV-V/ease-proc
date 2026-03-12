@@ -9,6 +9,7 @@ import { createToastStore } from "./toast.js";
 let vueApp;
 
 window.onload = function () {
+  appWindow.hide();
   // 禁用右键菜单 (保留开发环境)
   document.addEventListener("contextmenu", (event) => {
     // 判断是否为开发环境：通常开发环境使用 http 协议，生产环境使用 tauri/https 协议
@@ -60,6 +61,7 @@ window.onload = function () {
       upload_speed: "0 B/s",
       network_saturation: "0%",
     },
+    hasUpdate: false,
 
     // Toast 方法
     toast: createToastStore(),
@@ -95,7 +97,7 @@ window.onload = function () {
         this.logList = await invoke("get_app_logs", {
           filterType: this.activeLogTab,
         });
-      }, 5000);
+      }, 1000);
     },
 
     closeLogModal() {
@@ -412,7 +414,9 @@ window.onload = function () {
     // 打开GitHub
     openGithub() {
       if (window.__TAURI__?.shell) {
-        window.__TAURI__.shell.open("https://github.com");
+        window.__TAURI__.shell.open(
+          "https://github.com/maidoudouV-V/ease-proc",
+        );
       } else {
         this.showToast("warning", "无法打开链接", "Shell 模块未加载");
       }
@@ -455,6 +459,11 @@ window.onload = function () {
         console.warn("Tauri window API not available");
       }
     },
+    // 打开设置页面
+    openSettings() {
+      this.activeTab = "settings";
+      this.checkUpdate();
+    },
     // 打开监控进程文件夹
     openFolder(id) {
       invoke("open_app_folder", { id: id });
@@ -472,6 +481,15 @@ window.onload = function () {
         return;
       }
       await invoke("reset_database");
+    },
+    // 更新版本
+    async updateSelf() {
+      await invoke("update_self");
+      this.showToast("info", "正在更新", "稍后将自动重启...");
+    },
+    // 检查更新
+    async checkUpdate() {
+      this.hasUpdate = await invoke("check_update_self");
     },
     // 启动时调用
     async mounted() {
@@ -536,10 +554,17 @@ window.onload = function () {
           default:
         }
       });
+      let resetHasUpdateTimer = null;
+      listen("hasUpdate", (event) => {
+        this.hasUpdate = true;
+        clearTimeout(resetHasUpdateTimer);
+        resetHasUpdateTimer = setTimeout(() => {
+          this.hasUpdate = false;
+        }, 3601 * 1000);
+      });
       // 显示并聚焦窗口
       await appWindow.show();
       await appWindow.setFocus();
-      // 启动监控对象
     },
   };
   // 创建VUE应用

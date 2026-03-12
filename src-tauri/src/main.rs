@@ -7,16 +7,26 @@ use monitor::MonitorTargetType;
 use monitor_manager::MonitorManager;
 use parking_lot::{Mutex, RwLock};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use socket2::SockRef;
+use sysinfo::{Networks, System};
 use tauri_plugin_autostart::MacosLauncher;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::spawn;
 use tracing::{debug, info};
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use winreg::enums::HKEY_LOCAL_MACHINE;
+use winreg::RegKey;
+use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::process::Command;
 use std::{env, fs};
 use std::iter::Filter;
 use std::{collections::HashMap, sync::Arc};
+use std::os::windows::io::AsRawSocket;
 
 use chrono::Local;
 use tauri::Manager;
@@ -25,6 +35,10 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use tokio::time::sleep;
 use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent, WindowEvent};
+
+use winapi::um::handleapi::SetHandleInformation;
+use winapi::um::winbase::HANDLE_FLAG_INHERIT;
+use winapi::um::winnt::HANDLE;
 
 use crate::monitor::MonitorTarget;
 use crate::commands::*;
@@ -39,7 +53,15 @@ mod process_guard;
 mod process_sampler;
 
 fn main() {
-    println!("初始化应用...");
+    // 1. 拦截更新后的重启参数
+    let args: Vec<String> = env::args().collect();
+    if args.contains(&String::from("--post-update")) {
+        println!("检测到更新重启，等待旧进程退出...");
+        // 阻塞主线程 1 秒钟。
+        // 因为旧进程是强杀退出的（见第二步），OS 回收资源非常快，1秒绰绰有余。
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+     println!("初始化应用...");
     // 1. 获取当前 exe 的完整路径
     if let Ok(current_exe) = env::current_exe() {
         // 2. 获取 exe 所在的目录
@@ -143,6 +165,234 @@ fn main() {
             monitor_manager.start_all_active_monitors().await;
         });
         info!("======应用已启动======");
+
+        // 节点发现和更新机制
+        let discovered_nodes = Arc::new(Mutex::new(HashMap::<String, NodeInfo>::new()));
+        app.manage(NodeDiscoveryState(discovered_nodes.clone()));
+        let app_handle = app.handle();
+        tauri::async_runtime::spawn(async move {
+            // 初始化节点
+            let machine_id = get_machine_guid();
+            // 组播地址和端口
+            let multicast_addr = Ipv4Addr::new(239, 30, 4, 71);
+            let udp_listen_port = 56311;
+            let tcp_listen_port = 56311;
+        
+            // 绑定所有使用到的端口
+            let socket = match UdpSocket::bind(format!("0.0.0.0:{}", udp_listen_port)).await {
+                Ok(s) => {s},
+                Err(e) => {
+                    eprintln!("无法绑定 UDP 端口 {}: {}", udp_listen_port, e);
+                    return;
+                }
+            };
+            let listener = match TcpListener::bind(format!("0.0.0.0:{}", tcp_listen_port)).await {
+                Ok(l) => {l},
+                Err(e) => {
+                    eprintln!("无法绑定 TCP 端口 {}: {}", tcp_listen_port, e);
+                    return;
+                }
+            };
+
+            // 禁止网络句柄的“可继承”属性
+            unsafe {
+                // 将 UDP Socket 的底层句柄转换为 winapi 需要的 HANDLE 类型
+                let udp_handle = socket.as_raw_socket() as HANDLE;
+                // 参数解释：句柄，要修改的标志位（继承标志），新的值（0 表示清除该标志）
+                let result_udp = SetHandleInformation(udp_handle, HANDLE_FLAG_INHERIT, 0);
+                if result_udp == 0 {
+                    eprintln!("警告: 无法清除 UDP 句柄的继承标志");
+                }
+                let tcp_handle = listener.as_raw_socket() as HANDLE;
+                let result_tcp = SetHandleInformation(tcp_handle, HANDLE_FLAG_INHERIT, 0);
+                if result_tcp == 0 {
+                    eprintln!("警告: 无法清除 TCP 句柄的继承标志");
+                }
+            }
+
+            // 监听其它节点发来的TCP请求
+            let discovery_state = discovered_nodes.clone();
+            let tcp_listener_handle = tokio::spawn(async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((mut socket, addr)) => {
+                            let discovery_state = discovery_state.clone();
+                            tokio::spawn(async move {
+                                let mut buf = [0; 4096];
+                                // 读取客户端发来的指令
+                                if let Ok(n) = socket.read(&mut buf).await {
+                                    let node_message: NodeMessage = if let Ok(msg) = bincode::deserialize(&buf[..n]) {
+                                        msg
+                                    } else {
+                                        eprintln!("无法反序列化节点消息");
+                                        return;
+                                    };
+                                    match node_message {
+                                        // 如果对方的指令是要求下载更新
+                                        NodeMessage::Message(NodeMessageType::UpdateRequest) => {
+                                            // 读取本地 .exe 文件并发送
+                                            if let Ok(current_exe) = env::current_exe() {
+                                                if let Ok(file_data) = tokio::fs::read(&current_exe).await{
+                                                    let md5_hash = calculate_md5(&file_data);
+                                                    let node_message = NodeMessage::UpdateRequestData(UpdateDate{
+                                                        version: env!("CARGO_PKG_VERSION").to_string(),
+                                                        file_data,
+                                                        md5_hash
+                                                    });
+                                                    let encoded: Vec<u8> = bincode::serialize(&node_message).expect("序列化失败");
+                                                    let _ = socket.write_all(&encoded).await;
+                                                }
+                                            }
+                                        },
+                                        // 如果是发现新节点
+                                        NodeMessage::NewNodeMessage(mut new_node) => {
+                                            let mut nodes = discovery_state.lock();
+                                            new_node.ip = addr.ip().to_string();
+                                            if let None = nodes.insert(new_node.dev_id.clone(), new_node){
+                                                println!("收到来自 {} 的TCP响应 已注册新节点，当前节点数: {}", addr.ip().to_string(), nodes.len());
+                                            }
+                                        },
+                                        _ => {
+                                            return ;
+                                        }
+                                    }
+                                }
+                            });
+                        },
+                        Err(e) => {
+                            println!("接受客户端连接失败: {}", e);
+                            sleep(Duration::from_secs(10)).await;
+                        }
+                    };
+                }
+            });
+
+            // 加入组播组
+            for (name, data) in &Networks::new_with_refreshed_list(){
+                for ip_network in data.ip_networks() {
+                    match ip_network.addr {
+                        IpAddr::V4(ipv4) =>{
+                            if ipv4.is_loopback() {
+                                continue;
+                            }
+                            socket.join_multicast_v4(multicast_addr, ipv4).unwrap();
+                            println!("在网卡 {} {} 加入组播组...", name, ipv4);
+                            break;
+                        },
+                        IpAddr::V6(_) => continue,
+                    }
+                }
+            }
+
+            let socket_receiver = Arc::new(socket);
+            let socket_sender = socket_receiver.clone();
+            // 广播自身信息
+            let uid = machine_id.clone();
+            let sender_handle = tokio::spawn(async move{
+                let version = env!("CARGO_PKG_VERSION");
+                let networks = Networks::new_with_refreshed_list();
+                loop{
+                    for (name, data) in &networks {
+                        for ip_network in data.ip_networks() {
+                            match ip_network.addr {
+                                IpAddr::V4(ipv4) => {
+                                    // 排除回环地址 127.0.0.1
+                                    if ipv4.is_loopback() {
+                                        continue;
+                                    }
+                                    // 执行发送逻辑
+                                    let my_info = NodeInfo {
+                                        dev_id: uid.clone(),
+                                        ip: ipv4.to_string(),
+                                        port: tcp_listen_port,
+                                        version: version.to_string(),
+                                        update_time: Local::now().timestamp().to_string(),
+                                    };
+                                    let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
+                                    let target = SocketAddrV4::new(multicast_addr, udp_listen_port);
+                                    // 设置从指定网卡发出去
+                                    let sock_ref = SockRef::from(socket_sender.as_ref());
+                                    if let Err(_e) = sock_ref.set_multicast_if_v4(&ipv4) {
+                                        // 可能不支持组播
+                                        continue;
+                                    }
+                                    let _ = socket_sender.send_to(
+                                        &encoded, 
+                                        &target
+                                    ).await;
+                                    println!("正在从网卡 {} {} 发送广播...", name, ipv4);
+                                },
+                                IpAddr::V6(_) => continue,
+                            }
+                            break; // 只处理第一个有效 IP
+                        }
+                    }
+                    sleep(Duration::from_secs(3600)).await
+                }
+            });
+            // 监听局域网广播信息
+            let discovery_state = discovered_nodes.clone();
+            let receiver_handle = tokio::spawn(async move {
+                let version = env!("CARGO_PKG_VERSION");
+                let mut buf = [0u8; 1024];
+                loop {
+                    // 等待接收数据
+                    match socket_receiver.recv_from(&mut buf).await {
+                        Ok((len, addr)) => {
+                            let data = &buf[..len];
+                            if let Ok(info) = bincode::deserialize::<NodeInfo>(data) {
+                                // 过滤掉自己发送的广播
+                                if info.dev_id == machine_id{
+                                    continue;
+                                }
+                                // 如果有新版本，前端展示更新按钮
+                                if compare_versions(&info.version, version) == std::cmp::Ordering::Greater {
+                                    app_handle.emit_all("hasUpdate", ()).unwrap();
+                                }
+                                println!("{:?}",info);
+                                // 将节点信息存储到共享状态中
+                                let mut nodes = discovery_state.lock();
+                                if let None = nodes.insert(info.dev_id.clone(), info) {
+                                    println!("收到来自 {} 的广播 已注册新节点，当前节点数: {}", addr, nodes.len());
+                                    // 告诉对方自己的信息
+                                    let my_dev_id = machine_id.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(mut stream) = TcpStream::connect(&addr).await{
+                                            let my_info = NodeMessage::NewNodeMessage(NodeInfo {
+                                                 dev_id: my_dev_id, 
+                                                 ip: 0.to_string(), 
+                                                 port: tcp_listen_port, 
+                                                 version: version.to_string(), 
+                                                 update_time: Local::now().timestamp().to_string()});
+                                            let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
+                                            let _ = stream.write_all(&encoded).await;
+                                        }
+                                    });
+                                    
+                                };
+                            }
+                        }
+                        Err(e) => eprintln!("接收出错: {}", e),
+                    }
+                }
+            });
+
+            // 清理长时间没有心跳的节点
+            let discovery_state = discovered_nodes.clone();
+            tokio::spawn(async move{
+                loop{
+                    sleep(Duration::from_secs(600)).await;
+                    let mut nodes = discovery_state.lock();
+                    let now = Local::now().timestamp();
+                    nodes.retain(|_, info| {
+                        let last_update = info.update_time.parse::<i64>().unwrap_or(0);
+                        now - last_update < 7200 // 2小时没有更新就认为掉线了
+                    });
+                }
+            });
+            let _ = tokio::join!(receiver_handle, sender_handle, tcp_listener_handle);
+        });
+
         Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -158,7 +408,9 @@ fn main() {
         get_app_logs,
         open_app_folder,
         reset_database,
-        get_target_console_output 
+        get_target_console_output,
+        update_self,
+        check_update_self
     ])
     .run(tauri::generate_context!())
     .unwrap_or_else(|err|{
@@ -203,4 +455,55 @@ fn init_db_table(conn: &Connection) -> Result<()>{
 struct Payload {
     args: Vec<String>,
     cwd: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct NodeInfo {
+    dev_id: String,
+    ip: String,
+    port: u16,
+    version: String,
+    update_time: String,
+}
+
+// 节点列表
+pub struct NodeDiscoveryState(pub Arc<Mutex<HashMap<String, NodeInfo>>>);
+
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts: Vec<u32> = a.split('.').map(|x| x.parse().unwrap()).collect();
+    let b_parts: Vec<u32> = b.split('.').map(|x| x.parse().unwrap()).collect();
+    a_parts.cmp(&b_parts)
+}
+
+// 节点之间的通讯消息
+#[derive(Serialize, Deserialize, Debug)]
+enum NodeMessage{
+    Message(NodeMessageType),
+    UpdateRequestData(UpdateDate),
+    ErrorMessage(String),
+    NewNodeMessage(NodeInfo),
+}
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum NodeMessageType{
+    UpdateRequest,
+}
+#[derive(Serialize, Deserialize, Debug)]
+struct UpdateDate {
+    version: String,
+    file_data: Vec<u8>,
+    md5_hash: String,
+}
+
+fn calculate_md5(data: &[u8]) -> String {
+    // 计算 MD5 digest
+    let digest = md5::compute(data);
+    // 将 digest 格式化为 32 个字符的十六进制字符串
+    let hash_string = format!("{:x}", digest);
+    hash_string
+}
+
+fn get_machine_guid() -> String {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let crypto = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography").unwrap();
+    crypto.get_value("MachineGuid").unwrap_or_else(|_| "unknown".to_string())
 }
