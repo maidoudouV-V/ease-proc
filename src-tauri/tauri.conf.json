@@ -5,8 +5,7 @@
     "withGlobalTauri": true
   },
   "package": {
-    "productName": "ease-proc",
-    "version": "0.2.0"
+    "productName": "ease-proc"
   },
   "tauri": {
     "systemTray": {
