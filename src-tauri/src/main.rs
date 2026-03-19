@@ -6,7 +6,7 @@ use logging::SqliteLayer;
 use monitor::MonitorTargetType;
 use monitor_manager::MonitorManager;
 use parking_lot::{Mutex, RwLock};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use socket2::SockRef;
 use sysinfo::{Networks, System};
@@ -14,13 +14,12 @@ use tauri_plugin_autostart::MacosLauncher;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::spawn;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use winreg::enums::HKEY_LOCAL_MACHINE;
-use winreg::RegKey;
+use uuid::Uuid;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::process::Command;
 use std::{env, fs};
@@ -33,7 +32,7 @@ use tauri::Manager;
 use std::time::Duration;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent, WindowEvent};
 
 use winapi::um::handleapi::SetHandleInformation;
@@ -89,7 +88,9 @@ fn main() {
         let window = app.get_window("main").unwrap();
         window.show().unwrap();
         window.set_focus().unwrap();
-        app.emit_all("single-instance", Payload { args: argv, cwd }).unwrap();
+        if let Err(e) = app.emit_all("single-instance", Payload { args: argv, cwd }) {
+            error!("发送 single-instance 事件失败: {}", e);
+        }
     }))
     // 注册开机自启插件
     .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![]))) 
@@ -157,7 +158,9 @@ fn main() {
         tauri::async_runtime::spawn(async move {
             loop {
                 // 向前端推送事件
-                app_handle.emit_all("monitor-info-update", monitor_manager_arc.get_all_monitor_info().await).unwrap();
+                if let Err(e) = app_handle.emit_all("monitor-info-update", monitor_manager_arc.get_all_monitor_info().await) {
+                    error!("发送 monitor-info-update 事件失败: {}", e);
+                }
                 sleep(Duration::from_secs(2)).await;
             }
         });
@@ -172,7 +175,11 @@ fn main() {
         let app_handle = app.handle();
         tauri::async_runtime::spawn(async move {
             // 初始化节点
-            let machine_id = get_machine_guid();
+            let machine_id =get_or_init_uuid(&db_conn).expect("无法获取uuid");
+            println!("应用唯一ID: {}", machine_id);
+            let tcp_connect_timeout = Duration::from_secs(3);
+            let tcp_read_timeout = Duration::from_secs(5);
+            let tcp_write_timeout = Duration::from_secs(5);
             // 组播地址和端口
             let multicast_addr = Ipv4Addr::new(239, 30, 4, 71);
             let udp_listen_port = 56311;
@@ -220,7 +227,7 @@ fn main() {
                             tokio::spawn(async move {
                                 let mut buf = [0; 4096];
                                 // 读取客户端发来的指令
-                                if let Ok(n) = socket.read(&mut buf).await {
+                                if let Ok(Ok(n)) = timeout(tcp_read_timeout, socket.read(&mut buf)).await {
                                     let node_message: NodeMessage = if let Ok(msg) = bincode::deserialize(&buf[..n]) {
                                         msg
                                     } else {
@@ -240,7 +247,7 @@ fn main() {
                                                         md5_hash
                                                     });
                                                     let encoded: Vec<u8> = bincode::serialize(&node_message).expect("序列化失败");
-                                                    let _ = socket.write_all(&encoded).await;
+                                                    let _ = timeout(tcp_write_timeout, socket.write_all(&encoded)).await;
                                                 }
                                             }
                                         },
@@ -248,6 +255,7 @@ fn main() {
                                         NodeMessage::NewNodeMessage(mut new_node) => {
                                             let mut nodes = discovery_state.lock();
                                             new_node.ip = addr.ip().to_string();
+                                            new_node.update_time = Local::now().timestamp().to_string();
                                             if let None = nodes.insert(new_node.dev_id.clone(), new_node){
                                                 println!("收到来自 {} 的TCP响应 已注册新节点，当前节点数: {}", addr.ip().to_string(), nodes.len());
                                             }
@@ -256,6 +264,8 @@ fn main() {
                                             return ;
                                         }
                                     }
+                                } else {
+                                    eprintln!("读取节点 TCP 请求超时或失败: {}", addr);
                                 }
                             });
                         },
@@ -275,9 +285,11 @@ fn main() {
                             if ipv4.is_loopback() {
                                 continue;
                             }
-                            socket.join_multicast_v4(multicast_addr, ipv4).unwrap();
+                            if let Err(e) = socket.join_multicast_v4(multicast_addr, ipv4) {
+                                eprintln!("在网卡 {} {} 加入组播组失败: {}", name, ipv4, e);
+                                continue;
+                            }
                             println!("在网卡 {} {} 加入组播组...", name, ipv4);
-                            break;
                         },
                         IpAddr::V6(_) => continue,
                     }
@@ -306,7 +318,7 @@ fn main() {
                                         ip: ipv4.to_string(),
                                         port: tcp_listen_port,
                                         version: version.to_string(),
-                                        update_time: Local::now().timestamp().to_string(),
+                                        update_time: 0.to_string(),
                                     };
                                     let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
                                     let target = SocketAddrV4::new(multicast_addr, udp_listen_port);
@@ -324,7 +336,6 @@ fn main() {
                                 },
                                 IpAddr::V6(_) => continue,
                             }
-                            break; // 只处理第一个有效 IP
                         }
                     }
                     sleep(Duration::from_secs(3600)).await
@@ -340,43 +351,59 @@ fn main() {
                     match socket_receiver.recv_from(&mut buf).await {
                         Ok((len, addr)) => {
                             let data = &buf[..len];
-                            if let Ok(info) = bincode::deserialize::<NodeInfo>(data) {
+                            if let Ok(mut info) = bincode::deserialize::<NodeInfo>(data) {
                                 // 过滤掉自己发送的广播
                                 if info.dev_id == machine_id{
                                     continue;
                                 }
-                                // 如果有新版本，前端展示更新按钮
-                                if compare_versions(&info.version, version) == std::cmp::Ordering::Greater {
-                                    app_handle.emit_all("hasUpdate", ()).unwrap();
-                                }
-                                println!("{:?}",info);
-                                // 将节点信息存储到共享状态中
-                                let mut nodes = discovery_state.lock();
-                                if let None = nodes.insert(info.dev_id.clone(), info) {
-                                    println!("收到来自 {} 的广播 已注册新节点，当前节点数: {}", addr, nodes.len());
-                                    // 告诉对方自己的信息
-                                    let my_dev_id = machine_id.clone();
-                                    tokio::spawn(async move {
-                                        if let Ok(mut stream) = TcpStream::connect(&addr).await{
-                                            let my_info = NodeMessage::NewNodeMessage(NodeInfo {
-                                                 dev_id: my_dev_id, 
-                                                 ip: 0.to_string(), 
-                                                 port: tcp_listen_port, 
-                                                 version: version.to_string(), 
-                                                 update_time: Local::now().timestamp().to_string()});
-                                            let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
-                                            let _ = stream.write_all(&encoded).await;
-                                        }
-                                    });
-                                    
-                                };
+
+                                let app_handle = app_handle.clone();
+                                let discovery_state = discovery_state.clone();
+                                // 验证连接并告诉对方自己的信息
+                                let my_dev_id = machine_id.clone();
+                                tokio::spawn(async move {
+                                    if let Ok(Ok(mut stream)) = timeout(tcp_connect_timeout, TcpStream::connect(&addr)).await{
+                                        let my_info = NodeMessage::NewNodeMessage(NodeInfo {
+                                             dev_id: my_dev_id, 
+                                             ip: addr.ip().to_string(), 
+                                             port: tcp_listen_port, 
+                                             version: version.to_string(), 
+                                             update_time: 0.to_string()});
+                                        let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
+                                        match timeout(tcp_write_timeout, stream.write_all(&encoded)).await {
+                                            Ok(Ok(_)) => {
+                                                // 如果是新版本，前端展示更新按钮
+                                                if compare_versions(&info.version, version) == std::cmp::Ordering::Greater {
+                                                    if let Err(e) = app_handle.emit_all("hasUpdate", ()) {
+                                                        error!("发送 hasUpdate 事件失败: {}", e);
+                                                    }
+                                                }
+                                                // 将节点信息存储到共享状态中
+                                                info.ip = addr.ip().to_string();
+                                                info.update_time = Local::now().timestamp().to_string();
+                                                let mut nodes = discovery_state.lock();
+                                                let dev_id = info.dev_id.clone();
+                                                if let None = nodes.insert(info.dev_id.clone(), info) {
+                                                    println!("收到来自 {} 的广播 已注册新节点 {}，当前节点数: {}", addr, dev_id, nodes.len());
+                                                };
+                                            },
+                                            Ok(Err(e)) => {
+                                                println!("无法验证节点连接 {}: {}", addr, e);
+                                            },
+                                            Err(_) => {
+                                                eprintln!("向节点 {} 发送验证信息超时", addr);
+                                            }
+                                        };
+                                    } else {
+                                        eprintln!("连接节点 {} 超时或失败", addr);
+                                    }
+                                });
                             }
                         }
                         Err(e) => eprintln!("接收出错: {}", e),
                     }
                 }
             });
-
             // 清理长时间没有心跳的节点
             let discovery_state = discovered_nodes.clone();
             tokio::spawn(async move{
@@ -448,6 +475,16 @@ fn init_db_table(conn: &Connection) -> Result<()>{
         )",
         (),
     )?;
+
+    // 创建系统配置表
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS AppConfig (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_key TEXT,
+            config_value TEXT
+        )",
+        (),
+    )?;
     Ok(())
 }
 
@@ -470,9 +507,35 @@ struct NodeInfo {
 pub struct NodeDiscoveryState(pub Arc<Mutex<HashMap<String, NodeInfo>>>);
 
 pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_parts: Vec<u32> = a.split('.').map(|x| x.parse().unwrap()).collect();
-    let b_parts: Vec<u32> = b.split('.').map(|x| x.parse().unwrap()).collect();
+    let a_parts = match parse_version_parts(a) {
+        Some(parts) => parts,
+        None => {
+            eprintln!("版本号解析失败，已跳过比较: a={}", a);
+            return std::cmp::Ordering::Equal;
+        }
+    };
+    let b_parts = match parse_version_parts(b) {
+        Some(parts) => parts,
+        None => {
+            eprintln!("版本号解析失败，已跳过比较: b={}", b);
+            return std::cmp::Ordering::Equal;
+        }
+    };
     a_parts.cmp(&b_parts)
+}
+
+fn parse_version_parts(version: &str) -> Option<Vec<u32>> {
+    let mut parts = Vec::new();
+    for part in version.split('.') {
+        match part.parse::<u32>() {
+            Ok(n) => parts.push(n),
+            Err(e) => {
+                eprintln!("版本号字段解析失败: version={}, field={}, err={}", version, part, e);
+                return None;
+            }
+        }
+    }
+    Some(parts)
 }
 
 // 节点之间的通讯消息
@@ -502,8 +565,23 @@ fn calculate_md5(data: &[u8]) -> String {
     hash_string
 }
 
-fn get_machine_guid() -> String {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let crypto = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography").unwrap();
-    crypto.get_value("MachineGuid").unwrap_or_else(|_| "unknown".to_string())
+const UUID_KEY: &str = "app_uuid";
+pub fn get_or_init_uuid(conn: &Connection) -> rusqlite::Result<String> {
+    // 尝试读取
+    let mut stmt = conn.prepare(
+        "SELECT config_value FROM AppConfig WHERE config_key = ?1 LIMIT 1"
+    )?;
+    let result: rusqlite::Result<String> =
+        stmt.query_row(params![UUID_KEY], |row| row.get(0));
+
+    if let Ok(uuid) = result {
+        return Ok(uuid);
+    }
+    // 不存在则生成
+    let uuid = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO AppConfig (config_key, config_value) VALUES (?1, ?2)",
+        params![UUID_KEY, uuid],
+    )?;
+    Ok(uuid)
 }
