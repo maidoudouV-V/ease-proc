@@ -101,9 +101,17 @@ impl ProcessSampler {
     }
 
     // 检查程序是否正在运行中
-    pub fn check_alive(&self, pid: Pid) -> bool {
-        self.sys.read().process(pid).is_some()
+    // pub fn check_alive(&self, pid: Pid) -> bool {
+    //     self.sys.read().process(pid).is_some()
+    // }
+    pub fn check_alive(&self, pid: Pid, program_name: &OsStr) -> bool {
+        let sys = self.sys.read();
+        if let Some(proc) = sys.process(pid) {
+            return proc.name() == program_name;
+        }
+        false
     }
+    
 
     // // 获取当前系统的所有进程
     // fn get_processes(&self) -> &HashMap<Pid, Process>{

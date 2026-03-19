@@ -66,27 +66,31 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
     // 路径错误时
     if !program_path.exists() || program_path.is_dir() {
         error!("监控启动失败，程序路径不存在 {:?}", program_path);
-        app_handle.emit_all("status_signal", StatusSignal{
+        if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
             mt_id: id,
             target_type: "LocalProcess".to_string(),
             signal: "error".to_string(),
             message: format!("程序路径不存在: {:?}", program_path),
-        }).unwrap();
+        }) {
+            error!("发送 status_signal(error) 失败, mt_id={}: {}", id, e);
+        }
         return;
     }
-    app_handle.emit_all("status_signal", StatusSignal{
+    if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
         mt_id: id,
         target_type: "LocalProcess".to_string(),
         signal: "enable".to_string(),
         message: "监控任务启动成功:".to_string(),
-    }).unwrap();
+    }) {
+        error!("发送 status_signal(enable) 失败, mt_id={}: {}", id, e);
+    }
     info!("本地进程监控已启动，正在监控 {}", alias);
     // let mut sys = System::new_all();
     let mut pid_running = None;
     // 当手动停止程序时，记录临时停止状态，防止自动重启
     let mut temp_stop = false;
     // 程序名，用于判断子程序
-    let mut program_name = program_path.file_name().unwrap_or_default();
+    let program_name = program_path.file_name().unwrap_or_default();
     while *monitor_enabled.read() {
         // 接收启动或关闭进程指令
         {
@@ -99,26 +103,28 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                     // 检查进程是否还在
                     if let Some(current_pid) = pid_running{
                         pid_running = None;
-                        if process_sampler.check_alive(current_pid) {
+                        if process_sampler.check_alive(current_pid, &program_name) {
                             kill_process(current_pid.as_u32()).await.expect("停止进程失败");
-                            let mut performance_records_lock = performance_records.lock();
-                            performance_records_lock.pop_back();
-                            performance_records_lock.push_front(MonitorRecord::LocalProcess(LocalProcessMonitorRecord{
-                                mt_id: id,
-                                cpu_usage: 0.0,
-                                memory_usage: 0,
-                                pid: 0,
-                                running: false,
-                            }));
                             info!("已手动停止监控进程 {} PID:{}", alias, current_pid);
                         }
                     }
-                    app_handle.emit_all("status_signal", StatusSignal{
+                    let mut performance_records_lock = performance_records.lock();
+                    performance_records_lock.pop_back();
+                    performance_records_lock.push_front(MonitorRecord::LocalProcess(LocalProcessMonitorRecord{
+                        mt_id: id,
+                        cpu_usage: 0.0,
+                        memory_usage: 0,
+                        pid: 0,
+                        running: false,
+                    }));
+                    if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
                         mt_id: id,
                         target_type: "LocalProcess".to_string(),
                         signal: "stop".to_string(),
                         message: format!("{:?} 已停止运行", alias),
-                    }).unwrap();
+                    }) {
+                        error!("发送 status_signal(stop) 失败, mt_id={}: {}", id, e);
+                    }
                 }else if signal == "start" {
                     debug!("收到手动启动信号，启动程序 {}", alias);
                     if pid_running.is_none(){
@@ -140,22 +146,26 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                             }
                             Err(e) => {
                                 error!("监控进程手动启动失败，{} 错误: {}", alias, e);
-                                app_handle.emit_all("status_signal", StatusSignal{
+                                if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
                                     mt_id: id,
                                     target_type: "LocalProcess".to_string(),
                                     signal: "error".to_string(),
                                     message: format!("应用启动失败: {}", e),
-                                }).unwrap();
+                                }) {
+                                    error!("发送 status_signal(error) 失败, mt_id={}: {}", id, e);
+                                }
                                 return;
                             }
                         }
                     }
-                    app_handle.emit_all("status_signal", StatusSignal{
+                    if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
                         mt_id: id,
                         target_type: "LocalProcess".to_string(),
                         signal: "start".to_string(),
                         message: format!("{:?} 已启动", alias),
-                    }).unwrap();
+                    }) {
+                        error!("发送 status_signal(start) 失败, mt_id={}: {}", id, e);
+                    }
                     temp_stop = false;
                 }
             }
@@ -163,7 +173,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
 
         // 检查进程是否存在
         if let Some(current_pid) = pid_running {
-            if process_sampler.check_alive(current_pid) {
+            if process_sampler.check_alive(current_pid, &program_name) {
                 // 获取进程树（父进程+所有子进程）的总负载
                 let pstat = process_sampler.get_process_tree_usage(current_pid);
                 let mut performance_records_lock = performance_records.lock();
@@ -179,12 +189,12 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                 // 检查是否还有子进程
                 if let Some(new_pid) = process_sampler.check_for_handover(current_pid, program_name) {
                     pid_running = Some(Pid::from(new_pid));
-                    debug!("{} 监控跳转到子进程 PID:{}", alias, new_pid);
+                    debug!("{} 监控跳转到子进程 PID:{}", alias, new_pid.as_u32());
                     continue;
                 }else{
                     // 进程丢失，设置pid = None
                     pid_running = None;
-                    error!("进程 {} 停止运行 PID:{}", alias, current_pid);
+                    error!("进程 {} 停止运行 PID:{}", alias, current_pid.as_u32());
                     // 添加程序未运行记录
                     let mut performance_records_lock = performance_records.lock();
                     performance_records_lock.pop_back();
@@ -195,12 +205,14 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                         pid: 0,
                         running: false,
                     }));
-                    app_handle.emit_all("status_signal", StatusSignal{
+                    if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
                         mt_id: id,
                         target_type: "LocalProcess".to_string(),
                         signal: "refresh".to_string(),
                         message: "".to_string(),
-                    }).unwrap();
+                    }) {
+                        error!("发送 status_signal(refresh) 失败, mt_id={}: {}", id, e);
+                    }
                 }
             }
         }else{
@@ -216,13 +228,13 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                         // 直接从 Child 对象获取 PID
                         let new_pid = Pid::from_u32(child.id().unwrap());
                         pid_running = Some(new_pid);
-                        info!("程序已重新启动 {} PID:{}", alias, new_pid);
+                        info!("程序已重新启动 {} PID:{}", alias, new_pid.as_u32());
                     }
                     Err(e) => {error!("程序自动启动失败 {} 错误：{}", alias, e);}
                 }
             }
             if let Some(pid) = pid_running {
-                info!("已发现运行中进程 {} PID:{:?}，正在监控", alias, pid);
+                info!("已发现运行中进程 {} PID:{:?}，正在监控", alias, pid.as_u32());
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
