@@ -13,7 +13,7 @@ use parking_lot::{Mutex, RawRwLock, RwLock};
 use rusqlite::Connection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{error, info};
 use std::sync::Arc;
 use parking_lot::lock_api::RwLockReadGuard;
@@ -232,7 +232,6 @@ pub fn reset_database(app_handle: AppHandle, monitor_manager: State<'_, Arc<Moni
     Ok(())
 }
 
-
 // 获取指定目标历史控制台输出
 #[tauri::command]
 pub fn get_target_console_output(monitor_manager: State<'_, Arc<MonitorManager>>, id: usize) -> CommandResult<Vec<ConsoleMsg>>{
@@ -242,13 +241,15 @@ pub fn get_target_console_output(monitor_manager: State<'_, Arc<MonitorManager>>
 // 更新版本
 #[tauri::command]
 pub async fn update_self(node_discovery: State<'_, NodeDiscoveryState>) -> CommandResult<()>{
-    let nodes = node_discovery.0.lock();
-    // 查找版本更高的节点并按时间排序
-    let version = env!("CARGO_PKG_VERSION");
-    let mut update_candidates: Vec<NodeInfo> = nodes.values()
-        .filter(|info| compare_versions(&info.version, version) == std::cmp::Ordering::Greater)
-        .cloned()
-        .collect();
+    let mut update_candidates: Vec<NodeInfo> = {
+        let nodes = node_discovery.0.lock();
+        // 查找版本更高的节点并按时间排序
+        let version = env!("CARGO_PKG_VERSION");
+        nodes.values()
+            .filter(|info| compare_versions(&info.version, version) == std::cmp::Ordering::Greater)
+            .cloned()
+            .collect()
+    };
     update_candidates.sort_by(|a,b|{
         let version_ord = compare_versions(&b.version, &a.version);
         if version_ord != std::cmp::Ordering::Equal {
@@ -256,69 +257,105 @@ pub async fn update_self(node_discovery: State<'_, NodeDiscoveryState>) -> Comma
         }
         b.update_time.cmp(&a.update_time)
     });
-    spawn(async {
-        let version = env!("CARGO_PKG_VERSION");
-        for node in update_candidates {
-            info!("正在手动更新到版本 {}，尝试向 {} 下载更新包...", node.version, node.ip);    
-            let addr = format!("{}:{}", node.ip, node.port);
-            // 建立 TCP 连接
-            if let Ok(mut stream) = TcpStream::connect(&addr).await {
-                let send_message = bincode::serialize(&NodeMessage::Message(NodeMessageType::UpdateRequest)).unwrap();
-                let _ = stream.write_all(&send_message).await;
-                // 收文件数据
-                let mut file_data = Vec::new();
-                if let Ok(_) = stream.read_to_end(&mut file_data).await {
-                    let decoded: NodeMessage = if let Ok(msg) = bincode::deserialize(&file_data) {
-                        msg
-                    } else {
-                        info!("节点 {} 提供的更新数据格式不正确", node.ip);
-                        continue;
-                    };
-                    match decoded {
-                        NodeMessage::UpdateRequestData(um) => {
-                            // 执行更新
-                            let mut temp_file = env::temp_dir();
-                            temp_file.push("ease-proc-update.tmp"); 
-  
-                            if let Err(e) = tokio::fs::write(&temp_file, &um.file_data).await {
-                                error!("更新失败，写入临时文件失败: {}", e);
-                                return ;
-                            };
-                            println!("新版本已写入临时文件: {:?}", temp_file);
-                            // 3. 使用 self_replace 库替换当前的 .exe
-                            // 这一步是“黑魔法”：它会处理 Windows 的文件锁定，把当前运行的 exe 换掉
-                            if let Err(e) = self_update::self_replace::self_replace(&temp_file) {
-                                error!("更新失败，替换当前程序文件失败: {}", e);
-                                return ;
-                            };
-                            println!("当前程序文件已成功替换！");
-                            println!("正在重启...");
-                            if let Ok(current_exe) = env::current_exe(){
-                                if let Ok(_) = Command::new(current_exe).arg("--post-update").spawn() {
-                                    info!("更新到 {} 成功，正在重启...", version);
-                                    std::process::exit(0);
-                                };
-                            }
-                        },
-                        NodeMessage::ErrorMessage(err) => {
-                            info!("节点 {} 提供更新失败: {}，尝试更换节点", node.ip, err);
-                            continue;
-                        },
-                        _ => {
-                            continue;
-                        }
-                    }
-                }
-            }else {
-                info!("无法连接到更新节点 {}，尝试更换节点...", node.ip);
+    for node in update_candidates {
+        info!("正在手动更新到版本 {}，尝试向 {} 下载更新包...", node.version, node.ip);    
+        let addr = format!("{}:{}", node.ip, node.port);
+        // 建立 TCP 连接
+        let mut stream = match timeout(Duration::from_secs(10), TcpStream::connect(&addr)).await {
+            Ok(Ok(stream)) => {
+                // 连接成功
+                stream
+            }
+            Ok(Err(e)) => {
+                // 连接失败（非超时原因）
+                info!("无法连接到更新节点 {}: {}，尝试更换节点...", node.ip, e);
                 continue;
             }
-            break;
-        }
-    });
+            Err(_) => {
+                // 超时
+                info!("连接更新节点 {} 超时，尝试更换节点...", node.ip);
+                continue;
+            }
+        };
 
-    Ok(())
+        let send_message = bincode::serialize(&NodeMessage::Message(NodeMessageType::UpdateRequest)).unwrap();
+
+        match stream.write_all(&send_message).await {
+            Ok(_) => {},
+            Err(e) => {
+                error!("向节点 {} 发送更新请求失败: {}", node.ip, e);
+                return Err(CommandError(format!("向节点 {} 发送更新请求失败: {}", node.ip, e)));
+            },
+        }
+
+        // 请求成功，等待收文件数据
+        let mut file_data = Vec::new();
+        
+        match timeout(Duration::from_secs(60), stream.read_to_end(&mut file_data)).await {
+            Ok(Ok(_)) => {
+                let decoded: NodeMessage = if let Ok(msg) = bincode::deserialize(&file_data) {
+                    msg
+                } else {
+                    error!("节点 {} 提供的更新数据格式不正确", node.ip);
+                    return Err(CommandError(format!("节点 {} 提供的更新数据格式不正确", node.ip)));
+                };
+                match decoded {
+                    NodeMessage::UpdateRequestData(um) => {
+                        // 执行更新
+                        let mut temp_file = env::temp_dir();
+                        temp_file.push("ease-proc-update.tmp"); 
+    
+                        if let Err(e) = tokio::fs::write(&temp_file, &um.file_data).await {
+                            error!("更新失败，写入临时文件失败: {}", e);
+                            return Err(CommandError(format!("更新失败，写入临时文件失败: {}", e)));
+                        };
+                        println!("新版本已写入临时文件: {:?}", temp_file);
+                        // 3. 使用 self_replace 库替换当前的 .exe
+                        // 这一步是“黑魔法”：它会处理 Windows 的文件锁定，把当前运行的 exe 换掉
+                        if let Err(e) = self_update::self_replace::self_replace(&temp_file) {
+                            error!("更新失败，替换当前程序文件失败: {}", e);
+                            return Err(CommandError(format!("更新失败，替换当前程序文件失败: {}", e)));
+                        };
+                        info!("更新到 {} 成功，即将重启...", node.version);
+                        if let Ok(current_exe) = env::current_exe(){
+                            if let Ok(_) = Command::new(current_exe).arg("--post-update").spawn() {
+                                spawn(async {
+                                    sleep(Duration::from_secs(3)).await;
+                                    std::process::exit(0);
+                                });
+                                return Ok(()); // 这里返回成功，前端会显示更新成功的提示
+                            }else {
+                                error!("更新成功，但无法启动新版本，自动重启失败");
+                                return Err(CommandError(format!("更新成功，但无法启动新版本，自动重启失败")));
+                            }
+                        }else {
+                            error!("更新成功，但无法启动新版本，自动重启失败");
+                            return Err(CommandError(format!("更新成功，但无法获取当前程序路径，自动重启失败")));
+                        }
+                    },
+                    NodeMessage::ErrorMessage(err) => {
+                        info!("节点 {} 提供更新失败: {}，尝试更换节点", node.ip, err);
+                        continue;
+                    },
+                    _ => {
+                        info!("节点 {} 提供更新失败，尝试更换节点", node.ip);
+                        continue;
+                    }
+                }
+            },
+            Ok(Err(e)) => {
+                error!("从节点 {} 接收更新数据失败: {}", node.ip, e);
+                return Err(CommandError(format!("从节点 {} 接收更新数据失败: {}", node.ip, e)));
+            },
+            Err(_) => {
+                info!("从节点 {} 接收更新数据超时，尝试更换节点...", node.ip);
+                continue;
+            }
+        }
+    }
+    return Err(CommandError(format!("更新失败，没有可用的更新节点")));
 }
+
 // 检查是否有更新版本
 #[tauri::command]
 pub fn check_update_self(node_discovery: State<'_, NodeDiscoveryState>) -> CommandResult<bool>{
