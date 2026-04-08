@@ -273,7 +273,7 @@ pub fn start_process(program_path: &Path, capture_output: bool, app_handle: AppH
         }
         // 处理 stdout
         if let Some(stdout) = child.stdout.take() {
-            spawn(  handle_output(stdout, app_handle.clone(), id, console_outputs.clone()));
+            spawn(handle_output(stdout, app_handle.clone(), id, console_outputs.clone()));
         }
         // 处理 stderr
         if let Some(stderr) = child.stderr.take() {

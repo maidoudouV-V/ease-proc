@@ -483,9 +483,16 @@ window.onload = function () {
       await invoke("reset_database");
     },
     // 更新版本
-    async updateSelf() {
-      await invoke("update_self");
-      this.showToast("info", "正在更新", "稍后将自动重启...");
+    updateSelf() {
+      this.showToast("info", "正在更新", "尝试下载并安装更新...");
+      invoke("update_self")
+        .then(() => {
+          this.showToast("success", "更新成功", "即将重启...");
+        })
+        .catch((e) => {
+          console.error("更新失败", e);
+          this.showToast("error", "更新失败", e || "应用更新失败");
+        });
     },
     // 检查更新
     async checkUpdate() {
