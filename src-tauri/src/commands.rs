@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::logging::LogEntry;
 use crate::monitor::{ConsoleMsg, LocalProcessConfig, MonitorShowInfo, MonitorTarget, MonitorTargetType};
 use crate::monitor_manager::MonitorManager;
-use crate::{compare_versions, NodeDiscoveryState, NodeInfo, NodeMessage, NodeMessageType};
+use crate::{compare_versions, NodeDiscoveryState, NodeInfo, UpdateDate, UPDATE_REQ_MAGIC};
 
 use chrono::Local;
 use parking_lot::{Mutex, RawRwLock, RwLock};
@@ -278,9 +278,7 @@ pub async fn update_self(node_discovery: State<'_, NodeDiscoveryState>) -> Comma
             }
         };
 
-        let send_message = bincode::serialize(&NodeMessage::Message(NodeMessageType::UpdateRequest)).unwrap();
-
-        match stream.write_all(&send_message).await {
+        match stream.write_all(&UPDATE_REQ_MAGIC).await {
             Ok(_) => {},
             Err(e) => {
                 error!("向节点 {} 发送更新请求失败: {}", node.ip, e);
@@ -293,54 +291,42 @@ pub async fn update_self(node_discovery: State<'_, NodeDiscoveryState>) -> Comma
         
         match timeout(Duration::from_secs(60), stream.read_to_end(&mut file_data)).await {
             Ok(Ok(_)) => {
-                let decoded: NodeMessage = if let Ok(msg) = bincode::deserialize(&file_data) {
+                let update_date: UpdateDate = if let Ok(msg) = bincode::deserialize(&file_data) {
                     msg
                 } else {
                     error!("节点 {} 提供的更新数据格式不正确", node.ip);
                     return Err(CommandError(format!("节点 {} 提供的更新数据格式不正确", node.ip)));
                 };
-                match decoded {
-                    NodeMessage::UpdateRequestData(um) => {
-                        // 执行更新
-                        let mut temp_file = env::temp_dir();
-                        temp_file.push("ease-proc-update.tmp"); 
-    
-                        if let Err(e) = tokio::fs::write(&temp_file, &um.file_data).await {
-                            error!("更新失败，写入临时文件失败: {}", e);
-                            return Err(CommandError(format!("更新失败，写入临时文件失败: {}", e)));
-                        };
-                        println!("新版本已写入临时文件: {:?}", temp_file);
-                        // 3. 使用 self_replace 库替换当前的 .exe
-                        // 这一步是“黑魔法”：它会处理 Windows 的文件锁定，把当前运行的 exe 换掉
-                        if let Err(e) = self_update::self_replace::self_replace(&temp_file) {
-                            error!("更新失败，替换当前程序文件失败: {}", e);
-                            return Err(CommandError(format!("更新失败，替换当前程序文件失败: {}", e)));
-                        };
-                        info!("更新到 {} 成功，即将重启...", node.version);
-                        if let Ok(current_exe) = env::current_exe(){
-                            if let Ok(_) = Command::new(current_exe).arg("--post-update").spawn() {
-                                spawn(async {
-                                    sleep(Duration::from_secs(3)).await;
-                                    std::process::exit(0);
-                                });
-                                return Ok(()); // 这里返回成功，前端会显示更新成功的提示
-                            }else {
-                                error!("更新成功，但无法启动新版本，自动重启失败");
-                                return Err(CommandError(format!("更新成功，但无法启动新版本，自动重启失败")));
-                            }
-                        }else {
-                            error!("更新成功，但无法启动新版本，自动重启失败");
-                            return Err(CommandError(format!("更新成功，但无法获取当前程序路径，自动重启失败")));
-                        }
-                    },
-                    NodeMessage::ErrorMessage(err) => {
-                        info!("节点 {} 提供更新失败: {}，尝试更换节点", node.ip, err);
-                        continue;
-                    },
-                    _ => {
-                        info!("节点 {} 提供更新失败，尝试更换节点", node.ip);
-                        continue;
+                // 执行更新
+                let mut temp_file = env::temp_dir();
+                temp_file.push("ease-proc-update.tmp"); 
+
+                if let Err(e) = tokio::fs::write(&temp_file, &update_date.file_data).await {
+                    error!("更新失败，写入临时文件失败: {}", e);
+                    return Err(CommandError(format!("更新失败，写入临时文件失败: {}", e)));
+                };
+                println!("新版本已写入临时文件: {:?}", temp_file);
+                // 3. 使用 self_replace 库替换当前的 .exe
+                // 这一步是“黑魔法”：它会处理 Windows 的文件锁定，把当前运行的 exe 换掉
+                if let Err(e) = self_update::self_replace::self_replace(&temp_file) {
+                    error!("更新失败，替换当前程序文件失败: {}", e);
+                    return Err(CommandError(format!("更新失败，替换当前程序文件失败: {}", e)));
+                };
+                info!("更新到 {} 成功，即将重启...", node.version);
+                if let Ok(current_exe) = env::current_exe(){
+                    if let Ok(_) = Command::new(current_exe).arg("--post-update").spawn() {
+                        spawn(async {
+                            sleep(Duration::from_secs(3)).await;
+                            std::process::exit(0);
+                        });
+                        return Ok(()); // 这里返回成功，前端会显示更新成功的提示
+                    }else {
+                        error!("更新成功，但无法启动新版本，自动重启失败");
+                        return Err(CommandError(format!("更新成功，但无法启动新版本，自动重启失败")));
                     }
+                }else {
+                    error!("更新成功，但无法启动新版本，自动重启失败");
+                    return Err(CommandError(format!("更新成功，但无法获取当前程序路径，自动重启失败")));
                 }
             },
             Ok(Err(e)) => {

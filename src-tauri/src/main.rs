@@ -1,19 +1,17 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use anyhow::{anyhow, Result};
-
+use anyhow::{Result};
 use logging::SqliteLayer;
 use monitor::MonitorTargetType;
 use monitor_manager::MonitorManager;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use socket2::SockRef;
-use sysinfo::{Networks, System};
+use sysinfo::{Networks};
 use tauri_plugin_autostart::MacosLauncher;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::spawn;
 use tracing::{debug, error, info};
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -21,20 +19,16 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
-use std::process::Command;
 use std::{env, fs};
-use std::iter::Filter;
 use std::{collections::HashMap, sync::Arc};
 use std::os::windows::io::AsRawSocket;
-
 use chrono::Local;
 use tauri::Manager;
 use std::time::Duration;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use tokio::time::{sleep, timeout};
-use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent, WindowEvent};
-
+use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent};
 use winapi::um::handleapi::SetHandleInformation;
 use winapi::um::winbase::HANDLE_FLAG_INHERIT;
 use winapi::um::winnt::HANDLE;
@@ -109,7 +103,10 @@ fn main() {
         }            
         SystemTrayEvent::MenuItemClick { id, .. } => {
             match id.as_str() {
-                "quit" => app.exit(0), // 彻底退出
+                "quit" => {
+                    // 彻底退出
+                    app.exit(0)
+                }
                 "show" => {
                     let window = app.get_window("main").unwrap();
                     window.show().unwrap();
@@ -173,12 +170,12 @@ fn main() {
         let discovered_nodes = Arc::new(Mutex::new(HashMap::<String, NodeInfo>::new()));
         app.manage(NodeDiscoveryState(discovered_nodes.clone()));
         let app_handle = app.handle();
+        // 节点通讯线程
         tauri::async_runtime::spawn(async move {
             // 初始化节点
             let machine_id =get_or_init_uuid(&db_conn).expect("无法获取uuid");
             println!("应用唯一ID: {}", machine_id);
             let tcp_connect_timeout = Duration::from_secs(3);
-            let tcp_read_timeout = Duration::from_secs(5);
             let tcp_write_timeout = Duration::from_secs(5);
             // 组播地址和端口
             let multicast_addr = Ipv4Addr::new(239, 30, 4, 71);
@@ -225,47 +222,67 @@ fn main() {
                         Ok((mut socket, addr)) => {
                             let discovery_state = discovery_state.clone();
                             tokio::spawn(async move {
-                                let mut buf = [0; 4096];
                                 // 读取客户端发来的指令
-                                if let Ok(Ok(n)) = timeout(tcp_read_timeout, socket.read(&mut buf)).await {
-                                    let node_message: NodeMessage = if let Ok(msg) = bincode::deserialize(&buf[..n]) {
-                                        msg
-                                    } else {
-                                        eprintln!("无法反序列化节点消息");
-                                        return;
-                                    };
-                                    match node_message {
-                                        // 如果对方的指令是要求下载更新
-                                        NodeMessage::Message(NodeMessageType::UpdateRequest) => {
+                                let mut buf = [0; 4096];
+                                match timeout(Duration::from_secs(5), socket.read(&mut buf)).await {
+                                    Ok(Ok(n)) => {
+                                        if n == 0 {
+                                            return;
+                                        }
+                                        // 如果是更新请求
+                                        if buf.starts_with(UPDATE_REQ_MAGIC) {
                                             // 读取本地 .exe 文件并发送
                                             if let Ok(current_exe) = env::current_exe() {
                                                 if let Ok(file_data) = tokio::fs::read(&current_exe).await{
                                                     let md5_hash = calculate_md5(&file_data);
-                                                    let node_message = NodeMessage::UpdateRequestData(UpdateDate{
+                                                    let node_message = UpdateDate{
                                                         version: env!("CARGO_PKG_VERSION").to_string(),
                                                         file_data,
                                                         md5_hash
-                                                    });
+                                                    };
                                                     let encoded: Vec<u8> = bincode::serialize(&node_message).expect("序列化失败");
                                                     let _ = timeout(tcp_write_timeout, socket.write_all(&encoded)).await;
+                                                    println!("已响应 {} 的更新请求", addr);
+                                                }else {
+                                                    eprintln!("无法读取当前可执行文件内容，无法响应更新请求");
+                                                }
+                                            }else {
+                                                eprintln!("无法获取当前可执行文件路径，无法响应更新请求");
+                                            }
+                                        } else {
+                                            // 消息结构
+                                            let node_message: NodeMessage = if let Ok(msg) = bincode::deserialize(&buf[..n]) {
+                                                msg
+                                            } else {
+                                                eprintln!("无法反序列化节点消息");
+                                                return;
+                                            };
+                                            match node_message {
+                                                // 如果是发现新节点
+                                                NodeMessage::RequestMessage(RequestMessageType::NewNodeMessage(mut new_node)) => {
+                                                    let mut nodes = discovery_state.lock();
+                                                    new_node.ip = addr.ip().to_string();
+                                                    new_node.update_time = Local::now().timestamp().to_string();
+                                                    if nodes.len() < 1000{
+                                                        if let None = nodes.insert(new_node.dev_id.clone(), new_node){
+                                                            println!("收到来自 {} 的TCP响应 已注册新节点，当前节点数: {}", addr.ip().to_string(), nodes.len());
+                                                        }
+                                                    }
+                                                },
+                                                _ => {
+                                                    return ;
                                                 }
                                             }
-                                        },
-                                        // 如果是发现新节点
-                                        NodeMessage::NewNodeMessage(mut new_node) => {
-                                            let mut nodes = discovery_state.lock();
-                                            new_node.ip = addr.ip().to_string();
-                                            new_node.update_time = Local::now().timestamp().to_string();
-                                            if let None = nodes.insert(new_node.dev_id.clone(), new_node){
-                                                println!("收到来自 {} 的TCP响应 已注册新节点，当前节点数: {}", addr.ip().to_string(), nodes.len());
-                                            }
-                                        },
-                                        _ => {
-                                            return ;
                                         }
                                     }
-                                } else {
-                                    eprintln!("读取节点 TCP 请求超时或失败: {}", addr);
+                                    Ok(Err(e)) => {
+                                        eprintln!("读取请求失败: {}", e);
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        eprintln!("读取请求超时");
+                                        return;
+                                    }
                                 }
                             });
                         },
@@ -363,12 +380,12 @@ fn main() {
                                 let my_dev_id = machine_id.clone();
                                 tokio::spawn(async move {
                                     if let Ok(Ok(mut stream)) = timeout(tcp_connect_timeout, TcpStream::connect(&addr)).await{
-                                        let my_info = NodeMessage::NewNodeMessage(NodeInfo {
+                                        let my_info = NodeMessage::RequestMessage(RequestMessageType::NewNodeMessage(NodeInfo {
                                              dev_id: my_dev_id, 
-                                             ip: addr.ip().to_string(), 
+                                             ip: 0.to_string(),
                                              port: tcp_listen_port, 
                                              version: version.to_string(), 
-                                             update_time: 0.to_string()});
+                                             update_time: 0.to_string()}));
                                         let encoded: Vec<u8> = bincode::serialize(&my_info).expect("序列化失败");
                                         match timeout(tcp_write_timeout, stream.write_all(&encoded)).await {
                                             Ok(Ok(_)) => {
@@ -382,10 +399,12 @@ fn main() {
                                                 info.ip = addr.ip().to_string();
                                                 info.update_time = Local::now().timestamp().to_string();
                                                 let mut nodes = discovery_state.lock();
-                                                let dev_id = info.dev_id.clone();
-                                                if let None = nodes.insert(info.dev_id.clone(), info) {
-                                                    println!("收到来自 {} 的广播 已注册新节点 {}，当前节点数: {}", addr, dev_id, nodes.len());
-                                                };
+                                                if nodes.len() < 1000{
+                                                    let dev_id = info.dev_id.clone();
+                                                    if let None = nodes.insert(info.dev_id.clone(), info) {
+                                                        println!("收到来自 {} 的广播 已注册新节点 {}，当前节点数: {}", addr, dev_id, nodes.len());
+                                                    };
+                                                }
                                             },
                                             Ok(Err(e)) => {
                                                 println!("无法验证节点连接 {}: {}", addr, e);
@@ -495,7 +514,7 @@ struct Payload {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct NodeInfo {
+pub struct NodeInfo {
     dev_id: String,
     ip: String,
     port: u16,
@@ -538,17 +557,32 @@ fn parse_version_parts(version: &str) -> Option<Vec<u32>> {
     Some(parts)
 }
 
+/// 请求更新指令
+const UPDATE_REQ_MAGIC: &[u8] = b"EP_UPDATE_V1:REQUEST";
+
 // 节点之间的通讯消息
 #[derive(Serialize, Deserialize, Debug)]
-enum NodeMessage{
-    Message(NodeMessageType),
-    UpdateRequestData(UpdateDate),
-    ErrorMessage(String),
-    NewNodeMessage(NodeInfo),
+pub enum NodeMessage{
+    RequestMessage(RequestMessageType),
+    ResponseMessage(ResponseMessageType),
 }
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum NodeMessageType{
-    UpdateRequest,
+/// 请求消息
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RequestMessageType{
+    /// 新节点信息
+    NewNodeMessage(NodeInfo),
+    /// 下线通知
+    ExitNode(String), // 设备ID
+    /// 自定义消息
+    CustomMessage(String),
+}
+/// 响应消息
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ResponseMessageType{
+    /// 错误信息
+    ErrorMessage(String),
+    /// 自定义消息
+    CustomMessage(String),
 }
 #[derive(Serialize, Deserialize, Debug)]
 struct UpdateDate {
