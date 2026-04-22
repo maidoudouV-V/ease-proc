@@ -65,6 +65,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
     
     // 路径错误时
     if !program_path.exists() || program_path.is_dir() {
+        *monitor_enabled.write() = false;
         error!("监控启动失败，程序路径不存在 {:?}", program_path);
         if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
             mt_id: id,
@@ -145,6 +146,7 @@ pub async fn run_program_monitor( id:usize, config: LocalProcessConfig,
                                 process_sampler.refresh_processes();
                             }
                             Err(e) => {
+                                *monitor_enabled.write() = false;
                                 error!("监控进程手动启动失败，{} 错误: {}", alias, e);
                                 if let Err(e) = app_handle.emit_all("status_signal", StatusSignal{
                                     mt_id: id,

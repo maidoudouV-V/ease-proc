@@ -949,7 +949,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ease-proc"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "bincode",
@@ -958,7 +958,6 @@ dependencies = [
  "encoding_rs",
  "filetime",
  "globset",
- "md5",
  "notify-rust",
  "os_info",
  "parking_lot 0.11.2",
@@ -970,6 +969,7 @@ dependencies = [
  "self_update",
  "serde",
  "serde_json",
+ "sha2",
  "socket2 0.5.10",
  "ssh2",
  "sysinfo",
@@ -2448,12 +2448,6 @@ name = "matches"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
-
-[[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"

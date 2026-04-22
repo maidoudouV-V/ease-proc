@@ -115,7 +115,7 @@ impl MonitorManager {
             self.monitors.lock().get(&id).cloned()
         };
         if let Some(monitor) = monitor {
-            &self.process_sampler.spawn();
+            self.process_sampler.spawn();
             monitor.lock().start_monitor(self.app_handle.clone(), self.process_sampler.clone());
             // 修改数据库状态
             match self.connection_pool.get() {
@@ -165,6 +165,10 @@ impl MonitorManager {
             // 目标不存在
             return false;
         }
+        let is_remote_host = {
+            let monitor = monitor.lock();
+            matches!(monitor.target_type_cfg, MonitorTargetType::RemoteHost(_))
+        };
         let handle_to_wait = monitor.lock().stop_monitor();
         // 检查是否还有运行中的本地进程监控
         if !self.monitors.lock().values().any(|m| {
@@ -173,6 +177,12 @@ impl MonitorManager {
         }) {
             // 如果没有本地进程正在运行，关闭采集
             self.process_sampler.stop().await;
+        }
+        if is_remote_host {
+            if let Some(handle) = handle_to_wait {
+                handle.abort();
+            }
+            return true;
         }
         // 超时强行关闭线程
         let mut finished = false;
@@ -214,7 +224,7 @@ impl MonitorManager {
         let mut infos = Vec::with_capacity(monitors.len());
         for (_id, monitor) in monitors.into_iter() {
             let lock_info = monitor.try_lock();
-            if let Some(info) = lock_info {
+            if let Some(mut info) = lock_info {
                 let info = info.show_info();
                 infos.push(info);
             }
@@ -259,14 +269,17 @@ impl MonitorManager {
     }
     
     // 对目标发送控制指令
-    pub async fn change_control_signal(&self, id: usize, signal: String) {
+    pub async fn change_control_signal(&self, id: usize, signal: String) -> bool {
         debug!("对目标 id:{} 发送控制指令 {}", id, signal);
         let monitor_to_update = {
             let monitors = self.monitors.lock();
             monitors.get(&id).cloned() 
         };
-            if let Some(monitor) = monitor_to_update {
+        if let Some(monitor) = monitor_to_update {
             *monitor.lock().control_signal.lock() = signal;
+            true
+        } else {
+            false
         }
     }
 

@@ -7,6 +7,7 @@ use monitor_manager::MonitorManager;
 use parking_lot::{Mutex};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use socket2::SockRef;
 use sysinfo::{Networks};
 use tauri_plugin_autostart::MacosLauncher;
@@ -40,6 +41,7 @@ mod commands;
 mod monitor;
 mod local_process_monitor;
 mod local_host_monitor;
+mod remote_host_monitor;
 mod monitor_manager;
 mod logging;
 mod process_guard;
@@ -50,11 +52,10 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.contains(&String::from("--post-update")) {
         println!("检测到更新重启，等待旧进程退出...");
-        // 阻塞主线程 1 秒钟。
-        // 因为旧进程是强杀退出的（见第二步），OS 回收资源非常快，1秒绰绰有余。
-        std::thread::sleep(Duration::from_millis(1000));
+        // 阻塞主线程 2 秒钟。
+        std::thread::sleep(Duration::from_millis(2000));
     }
-     println!("初始化应用...");
+     println!("初始化应用... 当前版本: {}", env!("CARGO_PKG_VERSION"));
     // 1. 获取当前 exe 的完整路径
     if let Ok(current_exe) = env::current_exe() {
         // 2. 获取 exe 所在的目录
@@ -234,11 +235,13 @@ fn main() {
                                             // 读取本地 .exe 文件并发送
                                             if let Ok(current_exe) = env::current_exe() {
                                                 if let Ok(file_data) = tokio::fs::read(&current_exe).await{
-                                                    let md5_hash = calculate_md5(&file_data);
+                                                    let file_size = file_data.len() as u64;
+                                                    let sha256_hash = calculate_sha256(&file_data);
                                                     let node_message = UpdateDate{
                                                         version: env!("CARGO_PKG_VERSION").to_string(),
                                                         file_data,
-                                                        md5_hash
+                                                        file_size,
+                                                        sha256_hash,
                                                     };
                                                     let encoded: Vec<u8> = bincode::serialize(&node_message).expect("序列化失败");
                                                     let _ = timeout(tcp_write_timeout, socket.write_all(&encoded)).await;
@@ -588,15 +591,14 @@ pub enum ResponseMessageType{
 struct UpdateDate {
     version: String,
     file_data: Vec<u8>,
-    md5_hash: String,
+    file_size: u64,
+    sha256_hash: String,
 }
 
-fn calculate_md5(data: &[u8]) -> String {
-    // 计算 MD5 digest
-    let digest = md5::compute(data);
-    // 将 digest 格式化为 32 个字符的十六进制字符串
-    let hash_string = format!("{:x}", digest);
-    hash_string
+fn calculate_sha256(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
 }
 
 const UUID_KEY: &str = "app_uuid";

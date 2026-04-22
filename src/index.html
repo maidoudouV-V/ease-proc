@@ -228,20 +228,28 @@
               >
                 <div class="monitor-info">
                   <div class="monitor-avatar">
-                    <span class="material-symbols-outlined">web_asset</span>
+                    <span class="material-symbols-outlined">
+                      {{ target.target_type === 'RemoteHost' ? 'storage' : 'web_asset' }}
+                    </span>
                   </div>
                   <div class="monitor-details">
                     <div class="monitor-name">{{target.alias}}</div>
                     <div
-                      v-if="target.performance_record?.running"
+                      v-if="target.target_type === 'LocalProcess' && target.performance_record?.running"
                       class="monitor-id"
                     >
                       PID {{target.performance_record.pid}}
                     </div>
+                    <div
+                      v-if="target.target_type === 'RemoteHost'"
+                      class="monitor-id"
+                    >
+                      {{ target.performance_record?.running ? '远程主机在线' : '远程主机离线' }}
+                    </div>
                   </div>
                 </div>
                 <div
-                  v-if="target.performance_record?.running"
+                  v-if="target.target_type === 'LocalProcess' && target.performance_record?.running"
                   class="monitor-stats"
                 >
                   <div class="stat-item">
@@ -259,40 +267,73 @@
                     <div class="stat-label">内存</div>
                   </div>
                 </div>
+                <div
+                  v-if="target.target_type === 'RemoteHost' && target.performance_record?.running"
+                  class="monitor-stats"
+                >
+                  <div class="stat-item">
+                    <div class="stat-value">
+                      {{Math.round((target.performance_record?.cpu_usage || 0) * 10) / 10}} %
+                    </div>
+                    <div class="stat-label">CPU</div>
+                  </div>
+                  <div class="stat-item">
+                    <div class="stat-value">
+                      {{target.performance_record?.memory_usage || '0.0 GB'}}
+                    </div>
+                    <div class="stat-label">内存</div>
+                  </div>
+                  <div class="stat-item">
+                    <div class="stat-value">
+                      ↓ {{target.performance_record?.download_speed || '0 B/s'}} / ↑ {{target.performance_record?.upload_speed || '0 B/s'}}
+                    </div>
+                    <div class="stat-label">流量</div>
+                  </div>
+                </div>
                 <div class="monitor-actions">
+                  <template v-if="target.target_type === 'LocalProcess'">
+                    <button
+                      class="action-button"
+                      :class="{
+                        'danger': target.performance_record?.running,
+                        'success': !target.performance_record?.running,
+                        'loading': loadingStates[target.id]
+                      }"
+                      :title="target.performance_record?.running ? '停止进程' : '启动进程'"
+                      @click="target.performance_record?.running ? stopProcess(target.id, $event) : startProcess(target.id, $event)"
+                    >
+                      <span class="material-symbols-outlined">
+                        {{ target.performance_record?.running ?
+                        'power_settings_new' : 'play_arrow' }}
+                      </span>
+                    </button>
+                    <button
+                      class="action-button"
+                      title="控制台输出"
+                      @click="openConsoleWindow(target)"
+                    >
+                      <span class="material-symbols-outlined">terminal</span>
+                    </button>
+                    <button
+                      class="action-button"
+                      title="打开目录"
+                      @click="openFolder(target.id)"
+                    >
+                      <span class="material-symbols-outlined">folder_open</span>
+                    </button>
+                  </template>
                   <button
+                    v-if="target.target_type === 'RemoteHost'"
                     class="action-button"
                     :class="{
-                      'danger': target.performance_record?.running,
-                      'success': !target.performance_record?.running,
                       'loading': loadingStates[target.id]
                     }"
-                    :title="target.performance_record?.running ? '停止进程' : '启动进程'"
-                    @click="target.performance_record?.running ? stopProcess(target.id, $event) : startProcess(target.id, $event)"
+                    disabled
+                    title="详细数据暂未开放"
                   >
                     <span class="material-symbols-outlined">
-                      {{ target.performance_record?.running ?
-                      'power_settings_new' : 'play_arrow' }}
+                      analytics
                     </span>
-                  </button>
-                  <button
-                    class="action-button"
-                    title="控制台输出"
-                    @click="openConsoleWindow(target)"
-                  >
-                    <span class="material-symbols-outlined">terminal</span>
-                  </button>
-                  <!-- <button disabled class="action-button" title="历史数据">
-                    <span class="material-symbols-outlined"
-                      >blood_pressure</span
-                    >
-                  </button> -->
-                  <button
-                    class="action-button"
-                    title="打开目录"
-                    @click="openFolder(target.id)"
-                  >
-                    <span class="material-symbols-outlined">folder_open</span>
                   </button>
                 </div>
               </div>
@@ -356,7 +397,8 @@
                   <div class="monitor-details">
                     <div class="monitor-name">{{target.alias}}</div>
                     <div class="monitor-type">
-                      {{ target.target_type === 'LocalProcess' ? '本地进程':
+                      {{ target.target_type === 'LocalProcess' ? '本地进程' :
+                      target.target_type === 'RemoteHost' ? '远程主机' :
                       target.target_type }}
                     </div>
                   </div>
@@ -379,6 +421,7 @@
                     <span class="material-symbols-outlined">edit</span>
                   </button>
                   <button
+                    v-if="target.target_type === 'LocalProcess'"
                     class="action-button"
                     title="打开目录"
                     @click="openFolder(target.id)"
@@ -579,6 +622,7 @@
                 :disabled="isEditMode"
               >
                 <option value="LocalProcess">本地进程监控</option>
+                <option value="RemoteHost">远程主机监控</option>
               </select>
             </div>
 
@@ -635,6 +679,55 @@
               />
               <span class="checkbox-label">捕获控制台输出</span>
             </label>
+
+            <div
+              v-if="newMonitorForm.target_type === 'RemoteHost'"
+              class="form-group"
+            >
+              <label class="form-label">主机地址</label>
+              <input
+                type="text"
+                class="form-input"
+                v-model="newRemoteHostConfig.host"
+                placeholder="例如 192.168.1.10 或 server.local"
+              />
+            </div>
+            <div
+              v-if="newMonitorForm.target_type === 'RemoteHost'"
+              class="form-group"
+            >
+              <label class="form-label">端口</label>
+              <input
+                type="number"
+                class="form-input"
+                v-model="newRemoteHostConfig.port"
+                placeholder="22"
+              />
+            </div>
+            <div
+              v-if="newMonitorForm.target_type === 'RemoteHost'"
+              class="form-group"
+            >
+              <label class="form-label">用户名</label>
+              <input
+                type="text"
+                class="form-input"
+                v-model="newRemoteHostConfig.username"
+                placeholder="例如 root"
+              />
+            </div>
+            <div
+              v-if="newMonitorForm.target_type === 'RemoteHost'"
+              class="form-group"
+            >
+              <label class="form-label">密码</label>
+              <input
+                type="password"
+                class="form-input"
+                v-model="newRemoteHostConfig.password"
+                placeholder="输入 SSH 密码"
+              />
+            </div>
           </div>
           <div class="modal-footer">
             <button class="btn-secondary" @click="closeNewMonitorModal()">

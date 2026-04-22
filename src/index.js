@@ -123,6 +123,12 @@ window.onload = function () {
       auto_restart: true,
       capture_output: true,
     },
+    newRemoteHostConfig: {
+      host: "",
+      port: 22,
+      username: "",
+      password: "",
+    },
     openNewMonitorModal() {
       this.isEditMode = false;
       this.editingMonitorId = null;
@@ -135,6 +141,12 @@ window.onload = function () {
         type_config: this.newProcessConfig,
         alias: "",
         monitor_enabled: true,
+      };
+      this.newRemoteHostConfig = {
+        host: "",
+        port: 22,
+        username: "",
+        password: "",
       };
       this.showNewMonitorModal = true;
     },
@@ -152,8 +164,15 @@ window.onload = function () {
         this.newProcessConfig.path = form.type_config.path;
         this.newProcessConfig.auto_restart = form.type_config.auto_restart;
         this.newProcessConfig.capture_output = form.type_config.capture_output;
+        this.newMonitorForm.type_config = this.newProcessConfig;
       }
-      this.newMonitorForm.type_config = this.newProcessConfig;
+      if (form.target_type === "RemoteHost" && form.type_config) {
+        this.newRemoteHostConfig.host = form.type_config.host;
+        this.newRemoteHostConfig.port = form.type_config.port;
+        this.newRemoteHostConfig.username = form.type_config.username;
+        this.newRemoteHostConfig.password = form.type_config.password;
+        this.newMonitorForm.type_config = this.newRemoteHostConfig;
+      }
       this.showNewMonitorModal = true;
     },
 
@@ -207,6 +226,15 @@ window.onload = function () {
         this.showToast("error", "验证失败", "请选择或输入启动路径");
         return;
       }
+      if (
+        this.newMonitorForm.target_type === "RemoteHost" &&
+        (!this.newRemoteHostConfig.host.trim() ||
+          !this.newRemoteHostConfig.username.trim() ||
+          !this.newRemoteHostConfig.password.trim())
+      ) {
+        this.showToast("error", "验证失败", "请填写远程主机地址、用户名和密码");
+        return;
+      }
 
       // 设置按钮为加载状态
       const confirmButton = document.querySelector(
@@ -218,11 +246,19 @@ window.onload = function () {
       }
 
       try {
+        const typeConfig =
+          this.newMonitorForm.target_type === "RemoteHost"
+            ? {
+                ...this.newRemoteHostConfig,
+                port: parseInt(this.newRemoteHostConfig.port, 10) || 22,
+              }
+            : { ...this.newProcessConfig };
         if (this.isEditMode) {
           // --- 编辑逻辑 ---
           const updateForm = {
             ...this.newMonitorForm,
             id: this.editingMonitorId,
+            type_config: typeConfig,
           };
           await invoke("update_monitor_target", {
             updateTargetForm: updateForm,
@@ -237,7 +273,10 @@ window.onload = function () {
         } else {
           // --- 新建逻辑 ---
           await invoke("add_monitor_target", {
-            newTargetForm: this.newMonitorForm,
+            newTargetForm: {
+              ...this.newMonitorForm,
+              type_config: typeConfig,
+            },
           });
           this.showToast("success", "创建成功", "监控任务已成功创建");
         }
@@ -329,17 +368,22 @@ window.onload = function () {
       try {
         if (newState) {
           await invoke("enable_monitor", { id: parseInt(target.id) });
+          if (target.target_type === "RemoteHost") {
+            this.loadingStates[target.id] = false;
+            this.showToast("success", "开启监测", `已开启监测: ${target.alias}`);
+          }
         } else {
           await invoke("disable_monitor", { id: parseInt(target.id) });
-          this.showToast("info", "关闭监控", `已停止监控: ${target.alias}`);
+          this.showToast("info", "关闭监测", `已关闭监测: ${target.alias}`);
           this.loadingStates[target.id] = false;
         }
         target.monitor_enabled = newState; // 更新前端状态
         this.refreshMonitorList();
       } catch (err) {
         event.target.checked = !newState; // 失败时回滚开关状态
+        target.monitor_enabled = !newState;
         this.showToast("error", "操作失败", err.toString());
-        this.loadingStates[target.id] = true;
+        this.loadingStates[target.id] = false;
       }
     },
     async deleteProgram(id) {
@@ -520,7 +564,10 @@ window.onload = function () {
               monitorTarget.performance_record.network_saturation;
             continue;
           }
-          if (monitorTarget.target_type === "LocalProcess") {
+          if (
+            monitorTarget.target_type === "LocalProcess" ||
+            monitorTarget.target_type === "RemoteHost"
+          ) {
             monitorList.push(monitorTarget);
           }
         }
@@ -532,11 +579,12 @@ window.onload = function () {
         this.refreshMonitorList();
         const { mt_id, target_type, signal, message } = event.payload;
         let target = this.monitorList.find((t) => t.id === mt_id);
-        if (signal === "enable") {
+        const targetAlias = target?.alias || `任务 ${mt_id}`;
+        if (signal === "enable" && target_type === "LocalProcess") {
           this.showToast(
             "success",
             `启动监控`,
-            `已启动${target.alias}监控任务`,
+            `已启动${targetAlias}监控任务`,
           );
           this.loadingStates[mt_id] = false;
           return;
@@ -546,13 +594,29 @@ window.onload = function () {
             if (signal === "error") {
               this.showToast("error", "监控启动错误", `${message}`);
               this.loadingStates[mt_id] = false;
-              this.toggleMonitorEnabled(target, { target: { checked: false } });
+              if (target) {
+                target.monitor_enabled = false;
+              }
+              await this.refreshMonitorList();
             } else if (signal === "start") {
               this.showToast("success", `启动成功`, `${message}`);
               this.loadingStates[mt_id] = false;
             } else if (signal === "stop") {
               this.showToast("info", `停止运行`, `${message}`);
               this.loadingStates[mt_id] = false;
+            } else if (signal === "refresh") {
+              this.refreshMonitorList();
+            }
+            break;
+          }
+          case "RemoteHost": {
+            if (signal === "error") {
+              this.showToast("error", "远程监控配置错误", `${message}`);
+              this.loadingStates[mt_id] = false;
+              if (target) {
+                target.monitor_enabled = false;
+              }
+              await this.refreshMonitorList();
             } else if (signal === "refresh") {
               this.refreshMonitorList();
             }
