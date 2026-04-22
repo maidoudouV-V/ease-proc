@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::logging::LogEntry;
 use crate::monitor::{ConsoleMsg, LocalProcessConfig, MonitorShowInfo, MonitorTarget, MonitorTargetType};
 use crate::monitor_manager::MonitorManager;
-use crate::{compare_versions, NodeDiscoveryState, NodeInfo, UpdateDate, UPDATE_REQ_MAGIC};
+use crate::{calculate_sha256, compare_versions, NodeDiscoveryState, NodeInfo, UpdateDate, UPDATE_REQ_MAGIC};
 
 use chrono::Local;
 use parking_lot::{Mutex, RawRwLock, RwLock};
@@ -70,24 +70,33 @@ pub async fn refresh_monitor_targets(monitor_manager: State<'_, Arc<MonitorManag
 // 启动指定ID的监控目标
 #[tauri::command]
 pub async fn enable_monitor(monitor_manager: State<'_, Arc<MonitorManager>>, id: usize) -> Result<(), String> {
-    monitor_manager.enable_monitor(id).await;
-    Ok(())
+    if monitor_manager.enable_monitor(id).await {
+        Ok(())
+    } else {
+        Err(format!("监控目标 {} 启动请求失败", id))
+    }
 }
 
 // 禁用指定ID的监控目标
 #[tauri::command]
 pub async fn disable_monitor(monitor_manager: State<'_, Arc<MonitorManager>>, id: usize) -> Result<(), String> {
     let manager = monitor_manager.inner().clone();
-    let result = manager.disable_monitor(id).await;
-    Ok(())
+    if manager.disable_monitor(id).await {
+        Ok(())
+    } else {
+        Err(format!("监控目标 {} 停止请求失败", id))
+    }
 }
 
 // 对指定目标发送控制指令
 #[tauri::command]
 pub async fn send_control_signal(monitor_manager: State<'_, Arc<MonitorManager>>, id: usize, signal: String) -> Result<(), String> {
     let manager = monitor_manager.inner().clone();
-    let result = manager.change_control_signal(id, signal).await;
-    Ok(())
+    if manager.change_control_signal(id, signal).await {
+        Ok(())
+    } else {
+        Err(format!("监控目标 {} 不存在，无法发送控制指令", id))
+    }
 }
 
 /// 添加一个监控目标
@@ -297,6 +306,24 @@ pub async fn update_self(node_discovery: State<'_, NodeDiscoveryState>) -> Comma
                     error!("节点 {} 提供的更新数据格式不正确", node.ip);
                     return Err(CommandError(format!("节点 {} 提供的更新数据格式不正确", node.ip)));
                 };
+                let actual_size = update_date.file_data.len() as u64;
+                if actual_size != update_date.file_size {
+                    error!(
+                        "节点 {} 提供的更新包长度校验失败: expected={}, actual={}",
+                        node.ip,
+                        update_date.file_size,
+                        actual_size
+                    );
+                    return Err(CommandError(format!(
+                        "更新失败，更新包长度校验失败: expected={}, actual={}",
+                        update_date.file_size, actual_size
+                    )));
+                }
+                let actual_hash = calculate_sha256(&update_date.file_data);
+                if actual_hash != update_date.sha256_hash {
+                    error!("节点 {} 提供的更新包哈希校验失败", node.ip);
+                    return Err(CommandError("更新失败，更新包哈希校验失败".to_string()));
+                }
                 // 执行更新
                 let mut temp_file = env::temp_dir();
                 temp_file.push("ease-proc-update.tmp"); 
